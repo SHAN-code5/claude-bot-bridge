@@ -183,7 +183,7 @@ test('stop_relay does not cancel a later wait', async () => {
   assert.match(stopped.content[0].text, /Stop requested/);
   const waited = await service.call('wait_for_reply', { timeoutMs: 0 });
   assert.equal(waited.content[0].text.includes('Stopped'), false);
-  assert.match(waited.content[0].text, /no reply URL or inbox/i);
+  assert.match(waited.content[0].text, /no reply URL, SSE stream, or inbox/i);
 });
 
 test('list_bots hides query secrets', async () => {

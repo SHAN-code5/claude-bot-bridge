@@ -40,10 +40,12 @@ async function postWebhook(bot, payload, options = {}) {
       });
     } catch (err) {
       if (options.signal && options.signal.aborted) throw cancelled();
-      throw new HttpCallError(
+      const error = new HttpCallError(
         `Webhook for "${bot.id}" failed: ${describeFetchError(err, bot.timeoutMs)}.`,
         secrets
       );
+      error.notSent = connectFailed(err);
+      throw error;
     }
 
     const text = await readBody(response, secrets, `Webhook for "${bot.id}"`);
@@ -220,6 +222,22 @@ function describeFetchError(err, timeoutMs) {
   return scrubUrls(combined);
 }
 
+// Errors raised before a single byte of the request reached the bot.
+const NOT_SENT_CODES = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+function connectFailed(err) {
+  if (!err || err.name === 'AbortError' || err.name === 'TimeoutError') return false;
+  const code = (err.cause && err.cause.code) || err.code;
+  return NOT_SENT_CODES.has(code);
+}
+
 function scrubUrls(text) {
   return String(text).replace(/https?:\/\/[^\s'"]+/g, (match) => {
     const trimmed = match.replace(/[),.;]+$/, '');
@@ -248,4 +266,4 @@ function clip(text, max) {
   return `${oneLine.slice(0, max)}…`;
 }
 
-module.exports = { postWebhook, pollReplies, HttpCallError, clip, MAX_HTTP_BODY };
+module.exports = { postWebhook, pollReplies, HttpCallError, clip, headerGet, MAX_HTTP_BODY };

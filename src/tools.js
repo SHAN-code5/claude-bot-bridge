@@ -37,6 +37,12 @@ function createService(options) {
   };
   const rate = options.rateLimiter || new RateLimiter(config.rateLimitPerMinute || 0);
   const etags = options.etags || new Map();
+  // Which replies this caller has already been handed. Stdio uses the flag on
+  // the stored reply; each HTTP session passes its own (see sessionDelivery).
+  const delivery = options.delivery || {
+    has: (item) => item.delivered,
+    mark: (id) => store.markDelivered(id),
+  };
 
   const definitions = toolDefinitions(config);
 
@@ -48,7 +54,7 @@ function createService(options) {
       if (name === 'list_bots') text = listBots();
       else if (name === 'send_message') text = await sendMessage(input, signal);
       else if (name === 'get_replies') text = await getReplies(input, signal);
-      else       if (name === 'wait_for_reply') text = await waitForReply(input, signal);
+      else if (name === 'wait_for_reply') text = await waitForReply(input, signal);
       else if (name === 'broadcast_message') text = await broadcastMessage(input, signal);
       else if (name === 'relay_conversation') text = await relayConversation(input, signal);
       else if (name === 'stop_relay') text = stopRelay();
@@ -186,6 +192,8 @@ function createService(options) {
 
     // Poll snapshots that already exist (or appear on the first fetch) are not
     // "new". A stale reply file would otherwise look like the bot just answered.
+    // The exception is a reply for this thread first seen after the latest
+    // send on it: that is the bot answering quickly, not an old file.
     // Inbox posts are events: they still count unless ignoreExisting is set.
     const exclude = new Set();
     if (ignoreExisting) {
@@ -203,21 +211,24 @@ function createService(options) {
     throwIfCancelled(signal);
     await pollBots(botsForPoll(config, bot), pollErrors, signal);
     if (!includeExisting) {
+      const sentAt = threadId ? lastSentAt(threadId, bot) : null;
       for (const reply of store.list()) {
-        if (reply.source === 'poll') exclude.add(reply.id);
+        if (reply.source !== 'poll') continue;
+        if (sentAt != null && reply.threadId === threadId && Date.parse(reply.receivedAt) >= sentAt) continue;
+        exclude.add(reply.id);
       }
     }
 
     const deliver = (reply) => {
-      store.markDelivered(reply.id);
+      delivery.mark(reply.id);
       return formatWait(reply, Date.now() - started);
     };
 
-    const immediate = store.nextUndelivered(filter());
+    const immediate = nextUndelivered(filter());
     if (immediate) return deliver(immediate);
 
     const channels = channelsFor(config, bot);
-    if (!channels.poll && !channels.inbox) return noChannelText(bot, threadId);
+    if (!channels.poll && !channels.inbox && !channels.sse) return noChannelText(bot, threadId);
 
     const deadline = started + timeoutMs;
     let nextPollAt = Date.now() + interval;
@@ -228,13 +239,13 @@ function createService(options) {
       if (remaining <= 0) break;
       // Inbox posts are checked on a short slice. Reply URLs use pollIntervalMs.
       await sleep(Math.min(200, interval, remaining), signal);
-      const duringSleep = store.nextUndelivered(filter());
+      const duringSleep = nextUndelivered(filter());
       if (duringSleep) return deliver(duringSleep);
       if (Date.now() >= deadline) break;
       if (Date.now() + 20 >= nextPollAt) {
         await pollBots(botsForPoll(config, bot), pollErrors, signal);
         nextPollAt = Date.now() + interval;
-        const found = store.nextUndelivered(filter());
+        const found = nextUndelivered(filter());
         if (found) return deliver(found);
       }
     }
@@ -279,7 +290,7 @@ function createService(options) {
       }
       const known = new Set(store.ids());
       await sendMessage({ message: current, bot: speaker.id, threadId, context: `relay turn ${turn}` }, signal);
-      let reply = newestReply(known, threadId);
+      let reply = newestReply(known, threadId, speaker.id);
       if (!reply) {
         const waited = await waitForReply(
           { bot: speaker.id, threadId, timeoutMs: relayWait, pollIntervalMs: 500 },
@@ -289,7 +300,7 @@ function createService(options) {
           lines.push('Stopped by stop_relay.');
           break;
         }
-        reply = newestReply(known, threadId);
+        reply = newestReply(known, threadId, speaker.id);
         if (!reply) {
           lines.push(`Turn ${turn}: ${speaker.id} did not reply.`);
           lines.push(waited);
@@ -315,11 +326,27 @@ function createService(options) {
     return 'Stop requested. The running relay finishes the current turn, then stops.';
   }
 
-  function newestReply(known, threadId) {
+  // The relay shares one thread between both bots, so a late reply from the
+  // other bot must not count as this speaker's turn.
+  function newestReply(known, threadId, botId) {
     const fresh = store
-      .list({ threadId, excludeSources: ['sent'] })
+      .list({ threadId, bot: botId, excludeSources: ['sent'] })
       .filter((item) => !known.has(item.id));
     return fresh.length ? fresh[fresh.length - 1] : null;
+  }
+
+  function nextUndelivered(filter) {
+    return store.list(filter).find((item) => !delivery.has(item)) || null;
+  }
+
+  function lastSentAt(threadId, bot) {
+    let latest = null;
+    for (const item of store.list({ threadId, bot: bot ? bot.id : null })) {
+      if (item.source !== 'sent' || item.threadId !== threadId) continue;
+      const stamp = Date.parse(item.at || item.receivedAt);
+      if (Number.isFinite(stamp) && (latest == null || stamp > latest)) latest = stamp;
+    }
+    return latest;
   }
 
   function botIds(value) {
@@ -514,7 +541,25 @@ function channelsFor(config, bot) {
   const bots = bot ? [bot] : Object.values(config.bots);
   return {
     poll: bots.some((item) => item.replyUrl),
+    sse: bots.some((item) => item.sseUrl),
     inbox: Boolean(config.inbox && config.inbox.enabled),
+  };
+}
+
+/**
+ * Delivery tracking for one HTTP session, so a wait in one session does not
+ * consume a reply another session is waiting for. Replies that were already
+ * delivered when the session opened stay delivered.
+ */
+function sessionDelivery(store) {
+  const seen = new Set(store.list().filter((item) => item.delivered).map((item) => item.id));
+  return {
+    // Sent messages and sync replies were shown inline to whoever sent them.
+    has: (item) => item.source === 'sent' || (item.source === 'sync' && item.delivered) || seen.has(item.id),
+    mark(id) {
+      seen.add(id);
+      store.markDelivered(id);
+    },
   };
 }
 
@@ -682,8 +727,8 @@ function formatWait(reply, waitedMs) {
 
 function noChannelText(bot, threadId) {
   return [
-    'No reply is waiting, and there is no reply URL or inbox to watch.',
-    'Have the webhook respond with {"reply":"..."}, or configure a replyUrl or the inbox.',
+    'No reply is waiting, and there is no reply URL, SSE stream, or inbox to watch.',
+    'Have the webhook respond with {"reply":"..."}, or configure a replyUrl, an sseUrl, or the inbox.',
     bot ? `bot: ${bot.id}` : null,
     threadId ? `threadId: ${threadId}` : null,
   ]
@@ -703,4 +748,4 @@ function timeoutText({ timeoutMs, threadId, bot, pollErrors }) {
   return lines.filter((line) => line != null).join('\n');
 }
 
-module.exports = { createService, ToolError };
+module.exports = { createService, sessionDelivery, ToolError };

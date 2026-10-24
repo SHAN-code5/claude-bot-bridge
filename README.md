@@ -221,7 +221,7 @@ Yaad rakho: Claude tabhi bot se baat karta hai jab aap prompt karte ho. SSE aur 
 
 `wait_for_reply` also takes `timeoutMs`, `pollIntervalMs` (default 2000), `since`, `includeExisting`, and `ignoreExisting`.
 
-Text that is **already** on a reply URL when the wait starts is not treated as a new answer, so an old file does not look like the bot just responded. Call `get_replies` to read it. Pass `includeExisting: true` when you do want that current text from `wait_for_reply`.
+Text that is **already** on a reply URL when the wait starts is not treated as a new answer, so an old file does not look like the bot just responded. Call `get_replies` to read it. Pass `includeExisting: true` when you do want that current text from `wait_for_reply`. The exception is a JSON reply for the thread you are waiting on that the bridge first sees after the latest `send_message` on that thread: a bot that answers before `wait_for_reply` starts is still counted.
 
 The webhook body keeps the original fields and adds routing:
 
@@ -328,7 +328,7 @@ The bot POSTs:
 { "message": "Done.", "threadId": "thr_ab12", "bot": "assistant", "id": "m9" }
 ```
 
-Send the token as `Authorization: Bearer <token>` or `X-Bridge-Token`. Without an `id`, each POST is stored. With the same `id`, bot, and source, the second POST is a duplicate.
+Send the token as `Authorization: Bearer <token>` or `X-Bridge-Token`. The body must be sent as `Content-Type: application/json` (or another `+json` type); anything else gets `415`. A request with an `Origin` header gets `403`: bots do not send one and browsers always do, so a web page cannot post a fake reply even to a tokenless inbox. Without an `id`, each POST is stored. With the same `id`, bot, and source, the second POST is a duplicate.
 
 `BOT_INBOX_PUBLIC_URL` is the tunnel origin (`cloudflared`, `ngrok`, or similar). It is what the webhook payload advertises. `http://127.0.0.1:...` is only useful for a bot on the same machine. If `publicUrl` is an origin with no path, the bridge adds the inbox path.
 
@@ -423,9 +423,10 @@ The bridge forwards text. It does not give the bot a way to call tools inside Cl
 - `wait_for_reply` blocks that tool call. The default is two minutes and the cap is three unless `maxWaitMs` is raised (ten minutes at most). If the desktop app gives up sooner, pass a smaller `timeoutMs`.
 - A reply URL is snapshotted at the start of a wait. Older contents stay available through `get_replies`.
 - Plain-text reply files have no thread id. Two conversations will share them. Use the JSON shape above when that matters.
-- Replies are kept in memory (the latest 1000) until the process exits. Claude Desktop starts a new process when it relaunches. Set `stateFile` to keep them.
+- Replies are kept in memory (the latest 1000) until the process exits. Claude Desktop starts a new process when it relaunches. Set `stateFile` to keep them. Writes to that file are batched (about 50ms) and flushed on shutdown.
 - Payloads are text. There are no attachments. `message` and `context` are capped at 100,000 characters. Inbox bodies are capped at 256 KiB. A webhook or reply-URL body larger than 1 MiB is rejected.
-- The MCP client can cancel `wait_for_reply`. The bridge stops that call instead of blocking later tools until the timeout.
+- The MCP client can cancel `wait_for_reply`, over stdio or HTTP. Over HTTP, a client that disconnects cancels its call too. Tool calls on stdio run one at a time, but `ping`, `tools/list`, and resource reads are answered while a wait is running.
+- Over HTTP, each session tracks which replies it has been shown. A wait in one session does not use up a reply another session is waiting for.
 - One inbox serves every bot. Send the bot id in the POST if more than one bot replies there.
 - Timestamps in tool results are ISO-8601 UTC.
 
@@ -433,8 +434,8 @@ The bridge forwards text. It does not give the bot a way to call tools inside Cl
 
 | Command | What it does |
 | --- | --- |
-| `init --url <url> [--key <secret>]` | Merge this server into the Claude Desktop config. |
-| `doctor` | Ping each webhook and GET each reply URL. |
+| `init --url <url> [--key <secret>]` | Merge this server into the Claude Desktop config. The previous file is kept as `claude_desktop_config.json.bak`. |
+| `doctor` | Ping each webhook, GET each reply URL, and open each SSE stream. |
 | `http --port 8080` | Streamable HTTP MCP on localhost. Set `MCP_HTTP_TOKEN` before binding anything else. |
 | `dashboard` | Local page of threads and messages. `DASHBOARD_PORT` also turns it on next to stdio. |
 | `tunnel` | Run `cloudflared` against the inbox and print the public URL. |
@@ -442,9 +443,9 @@ The bridge forwards text. It does not give the bot a way to call tools inside Cl
 
 `broadcast_message` sends one text to many bots. `relay_conversation` lets two configured bots answer each other for up to 20 turns. `stop_relay` asks that loop to stop after the current turn. Thread history is an MCP resource: `bridge://threads` and `bridge://thread/{threadId}`.
 
-A reply SSE URL (`BOT_REPLY_SSE_URL`) is a stream the bot hosts. The bridge connects out, so the bot does not need a public callback. Events look like `data: {"message":"...","threadId":"..."}`.
+A reply SSE URL (`BOT_REPLY_SSE_URL`) is a stream the bot hosts. The bridge connects out, so the bot does not need a public callback. Events look like `data: {"message":"...","threadId":"..."}`. The response must be `Content-Type: text/event-stream`; any other type stops the client with a log line. When the stream closes, the bridge waits before reconnecting, starting at 500ms and doubling up to 15 seconds while the stream sends nothing. `wait_for_reply` watches SSE replies the same way it watches the inbox.
 
-Optional HMAC: set `BOT_SIGNING_SECRET`. Each POST gets `X-Bridge-Timestamp` and `X-Bridge-Signature: sha256=<hmac of timestamp.body>`. The inbox checks `BOT_INBOX_SIGNING_SECRET` the same way. `BOT_ALLOWED_HOSTS` is a comma-separated host allowlist. Each bot defaults to 30 requests a minute, with two retries on 429 and 5xx.
+Optional HMAC: set `BOT_SIGNING_SECRET`. Each POST gets `X-Bridge-Timestamp` and `X-Bridge-Signature: sha256=<hmac of timestamp.body>`. The inbox checks `BOT_INBOX_SIGNING_SECRET` the same way. `BOT_ALLOWED_HOSTS` is a comma-separated host allowlist (case does not matter). Each bot defaults to 30 requests a minute. A webhook POST is retried up to twice, but only when the bot cannot have acted on it: a `429` or `503`, or a connection that failed before the request was sent (refused, DNS failure, unreachable). A timeout, a dropped connection, `502`, `504`, and other errors are not retried, because the bot may already have the message. Bots should still treat `messageId` as an idempotency key.
 
 Recipes for n8n, Zapier, Discord-style bots, and a Grok-style webhook are in [docs/recipes.md](docs/recipes.md). The threat model is in [SECURITY.md](SECURITY.md). Releases follow [semver](https://semver.org); see [CHANGELOG.md](CHANGELOG.md).
 

@@ -11,9 +11,13 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # A step's own env is not visible to that step's `if`, so the check lives
+    # here. Only a boolean is job-wide; the token stays on the publish step.
+    env:
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -22,12 +26,12 @@ jobs:
       - name: Pack the Desktop Extension
         run: node bin/claude-bot-bridge.js pack --out dist/claude-bot-bridge.mcpb
       - name: GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/claude-bot-bridge.mcpb
           generate_release_notes: true
       - name: Publish to npm
-        if: env.NODE_AUTH_TOKEN != ''
+        if: env.HAS_NPM_TOKEN == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
