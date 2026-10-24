@@ -6,15 +6,19 @@ const { notificationFor } = require('./runtime');
 
 function startHttpTransport({ handler, runtime, host, port, token, allowedOrigins, log }) {
   const sessions = new Map();
+  const maxSessions = 100;
   runtime.subscribe((reply) => {
     const message = notificationFor(reply);
     for (const session of sessions.values()) session.send(message);
   });
 
   const server = http.createServer((req, res) => {
-    handle(req, res, { handler, sessions, token, allowedOrigins, host, log }).catch((err) => {
+    handle(req, res, { handler, sessions, maxSessions, token, allowedOrigins, host, log }).catch((err) => {
       if (log) log.error(err.message || 'http transport failure');
-      if (!res.headersSent) sendJson(res, 500, { error: 'Internal error' });
+      if (!res.headersSent) {
+        const status = err && err.status === 413 ? 413 : 500;
+        sendJson(res, status, { error: status === 413 ? 'Body is too large' : 'Internal error' });
+      }
     });
   });
 
@@ -90,7 +94,7 @@ async function handle(req, res, ctx) {
     sendJson(res, 400, { error: 'Mcp-Session-Id is required' });
     return;
   }
-  if (isInitialize) session = createSession(ctx.sessions);
+  if (isInitialize) session = createSession(ctx.sessions, ctx.maxSessions);
 
   const hasId = message.id !== undefined && message.id !== null;
   const isRequest = hasId && typeof message.method === 'string' && !message.method.startsWith('notifications/');
@@ -118,7 +122,18 @@ function openStream(req, res, ctx) {
   });
   res.write(': open\n\n');
   session.add(res);
-  req.on('close', () => session.remove(res));
+  const beat = setInterval(() => {
+    try {
+      res.write(': ping\n\n');
+    } catch {
+      clearInterval(beat);
+    }
+  }, 15000);
+  if (typeof beat.unref === 'function') beat.unref();
+  req.on('close', () => {
+    clearInterval(beat);
+    session.remove(res);
+  });
 }
 
 function endSession(req, res, ctx) {
@@ -132,7 +147,11 @@ function endSession(req, res, ctx) {
   res.end();
 }
 
-function createSession(sessions) {
+function createSession(sessions, maxSessions) {
+  while (sessions.size >= maxSessions) {
+    const oldest = sessions.keys().next().value;
+    sessions.delete(oldest);
+  }
   const clients = new Set();
   const session = {
     id: crypto.randomBytes(16).toString('hex'),

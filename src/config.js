@@ -256,9 +256,9 @@ function applyEnv(cfg, env) {
   }
   if (env.BOT_INBOX_HOST) cfg.inbox.host = env.BOT_INBOX_HOST;
   if (env.BOT_INBOX_PATH) cfg.inbox.path = normalizeInboxPath(env.BOT_INBOX_PATH);
-  if (env.BOT_INBOX_TOKEN) cfg.inbox.token = env.BOT_INBOX_TOKEN;
-  if (env.BOT_INBOX_SIGNING_SECRET) cfg.inbox.signingSecret = env.BOT_INBOX_SIGNING_SECRET;
-  if (env.BOT_INBOX_PUBLIC_URL) cfg.inbox.publicUrl = env.BOT_INBOX_PUBLIC_URL;
+  if (presentEnv(env, 'BOT_INBOX_TOKEN')) cfg.inbox.token = presentEnv(env, 'BOT_INBOX_TOKEN');
+  if (presentEnv(env, 'BOT_INBOX_SIGNING_SECRET')) cfg.inbox.signingSecret = presentEnv(env, 'BOT_INBOX_SIGNING_SECRET');
+  if (presentEnv(env, 'BOT_INBOX_PUBLIC_URL')) cfg.inbox.publicUrl = presentEnv(env, 'BOT_INBOX_PUBLIC_URL');
   if (env.BOT_ALLOWED_HOSTS) cfg.allowedHosts = parseHostList(env.BOT_ALLOWED_HOSTS);
   if (env.BOT_RATE_LIMIT_PER_MINUTE) cfg.rateLimitPerMinute = env.BOT_RATE_LIMIT_PER_MINUTE;
   if (env.BOT_MAX_RETRIES) cfg.maxRetries = env.BOT_MAX_RETRIES;
@@ -274,15 +274,36 @@ function applyEnv(cfg, env) {
 
 function envBotPatch(env) {
   const patch = {};
-  if (env.BOT_WEBHOOK_URL) patch.url = env.BOT_WEBHOOK_URL;
-  if (env.BOT_NAME) patch.name = env.BOT_NAME;
-  if (env.BOT_WEBHOOK_KEY) patch.key = env.BOT_WEBHOOK_KEY;
-  if (env.BOT_KEY_HEADER) patch.keyHeader = env.BOT_KEY_HEADER;
-  if (Object.prototype.hasOwnProperty.call(env, 'BOT_KEY_PREFIX')) patch.keyPrefix = env.BOT_KEY_PREFIX;
-  if (env.BOT_REPLY_URL) patch.replyUrl = env.BOT_REPLY_URL;
-  if (env.BOT_REPLY_SSE_URL) patch.sseUrl = env.BOT_REPLY_SSE_URL;
-  if (env.BOT_SIGNING_SECRET) patch.signingSecret = env.BOT_SIGNING_SECRET;
+  const url = presentEnv(env, 'BOT_WEBHOOK_URL');
+  const name = presentEnv(env, 'BOT_NAME');
+  const key = presentEnv(env, 'BOT_WEBHOOK_KEY');
+  const keyHeader = presentEnv(env, 'BOT_KEY_HEADER');
+  const replyUrl = presentEnv(env, 'BOT_REPLY_URL');
+  const sseUrl = presentEnv(env, 'BOT_REPLY_SSE_URL');
+  const signingSecret = presentEnv(env, 'BOT_SIGNING_SECRET');
+  if (url) patch.url = url;
+  if (name) patch.name = name;
+  if (key) patch.key = key;
+  if (keyHeader) patch.keyHeader = keyHeader;
+  if (Object.prototype.hasOwnProperty.call(env, 'BOT_KEY_PREFIX') && !isUserConfigPlaceholder(env.BOT_KEY_PREFIX)) {
+    patch.keyPrefix = env.BOT_KEY_PREFIX;
+  }
+  if (replyUrl) patch.replyUrl = replyUrl;
+  if (sseUrl) patch.sseUrl = sseUrl;
+  if (signingSecret) patch.signingSecret = signingSecret;
   return patch;
+}
+
+function isUserConfigPlaceholder(value) {
+  return typeof value === 'string' && /^\$\{user_config\.[A-Za-z0-9_]+\}$/.test(value.trim());
+}
+
+function presentEnv(env, name) {
+  if (!Object.prototype.hasOwnProperty.call(env, name)) return undefined;
+  const value = env[name];
+  if (isUserConfigPlaceholder(value)) return undefined;
+  if (typeof value === 'string' && value.trim() === '') return undefined;
+  return value;
 }
 
 function finalizeBots(cfg, env) {

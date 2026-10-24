@@ -137,6 +137,68 @@ test('signs webhook bodies, retries 503, and enforces the rate limit', async () 
   }
 });
 
+test('blank Desktop Extension placeholders are not treated as secrets or URLs', () => {
+  const config = loadConfig({
+    env: {
+      BOT_WEBHOOK_URL: 'https://example.com/hook',
+      BOT_WEBHOOK_KEY: '${user_config.webhook_key}',
+      BOT_REPLY_URL: '${user_config.reply_url}',
+      BOT_REPLY_SSE_URL: '${user_config.reply_sse_url}',
+      BOT_SIGNING_SECRET: '${user_config.signing_secret}',
+    },
+    cwd: tempDir(),
+  });
+  assert.equal(config.bots.default.key, undefined);
+  assert.equal(config.bots.default.replyUrl, undefined);
+  assert.equal(config.bots.default.sseUrl, undefined);
+  assert.equal(config.bots.default.signingSecret, undefined);
+});
+
+test('init rejects a non-http webhook URL', () => {
+  assert.throws(
+    () => initCommand({ argv: ['--url', 'ftp://example.com/hook'], platform: 'linux', homedir: tempDir(), env: {} }),
+    /http or https/
+  );
+});
+
+test('SSE auth failures are not retried', async () => {
+  let hits = 0;
+  const clients = startSseClients({
+    config: {
+      bots: {
+        assistant: {
+          id: 'assistant',
+          sseUrl: 'http://127.0.0.1/events',
+          key: 'k',
+          keyHeader: 'Authorization',
+          keyPrefix: 'Bearer ',
+        },
+      },
+    },
+    store: new ReplyStore(),
+    log: { info() {}, error() {} },
+    fetchImpl: async () => {
+      hits += 1;
+      return { status: 401, body: null };
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await clients.close();
+  assert.equal(hits, 1);
+});
+
+test('reply notifications wait until initialize', () => {
+  const { createNotifyBuffer } = require('../src/runtime');
+  const sent = [];
+  const buffer = createNotifyBuffer((message) => sent.push(message));
+  buffer.send({ method: 'notifications/message' });
+  assert.equal(sent.length, 0);
+  buffer.markReady();
+  assert.equal(sent.length, 1);
+  buffer.send({ method: 'notifications/message', params: { data: 'later' } });
+  assert.equal(sent.length, 2);
+});
+
 test('allowlist rejects a host that was not named', () => {
   assert.throws(
     () =>
@@ -236,8 +298,12 @@ test('broadcast and relay move messages between two bots until stopped', async (
     });
     const runtime = createRuntime();
     const { service } = serviceFor(config, { runtime });
-    const broadcast = await service.call('broadcast_message', { message: 'hi all', bots: ['left', 'right'] });
+    const broadcast = await service.call('broadcast_message', {
+      message: 'hi all',
+      bots: ['left', 'missing', 'right'],
+    });
     assert.match(broadcast.content[0].text, /echo hi all/);
+    assert.match(broadcast.content[0].text, /missing failed/);
     assert.equal((broadcast.content[0].text.match(/echo hi all/g) || []).length, 2);
 
     const relayRuntime = createRuntime();

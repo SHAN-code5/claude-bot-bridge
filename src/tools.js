@@ -244,7 +244,12 @@ function createService(options) {
     const parts = [`Broadcast to ${ids.join(', ')} on thread ${threadId}.`];
     for (const id of ids) {
       parts.push('');
-      parts.push(await sendMessage({ ...args, bot: id, threadId }, signal));
+      try {
+        parts.push(await sendMessage({ ...args, bot: id, threadId }, signal));
+      } catch (err) {
+        if (err && err.name === 'Cancelled') throw err;
+        parts.push(`${id} failed: ${err && err.message ? err.message : 'request failed'}`);
+      }
     }
     return parts.join('\n');
   }
