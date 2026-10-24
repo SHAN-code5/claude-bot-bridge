@@ -53,6 +53,18 @@ function initCommand(options) {
   if (!url) {
     throw new Error('Pass --url <webhook>. Example: claude-bot-bridge init --url https://example.com/webhook --key secret');
   }
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    throw new Error('Webhook URL is not valid. Use an http or https URL.');
+  }
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error('Webhook URL must use http or https.');
+  }
+  if (parsedUrl.username || parsedUrl.password) {
+    throw new Error('Put the secret in --key or BOT_WEBHOOK_KEY, not in the URL.');
+  }
   const entry = buildDesktopEntry({
     url,
     key: flags.key || env.BOT_WEBHOOK_KEY || '',

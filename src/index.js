@@ -4,7 +4,7 @@ const { loadConfig, parseArgv, ConfigError } = require('./config');
 const { createLineReader } = require('./stdio');
 const { redact } = require('./redact');
 const { createApp, assertLoopback } = require('./app');
-const { notificationFor } = require('./runtime');
+const { notificationFor, createNotifyBuffer } = require('./runtime');
 const { startHttpTransport } = require('./http-transport');
 const {
   initCommand,
@@ -173,6 +173,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
           const response = await handler(message, controller.signal);
           if (controller.signal.aborted) continue;
           if (response) write(response);
+          if (message.method === 'initialize' && response) outbound.markReady();
         } catch (err) {
           if (err && err.name === 'Cancelled') continue;
           if (message.id != null && !controller.signal.aborted) {
@@ -235,7 +236,8 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   process.on('SIGINT', () => shutdown(0));
   process.on('SIGTERM', () => shutdown(0));
 
-  runtime.subscribe((reply) => write(notificationFor(reply)));
+  const outbound = createNotifyBuffer(write);
+  runtime.subscribe((reply) => outbound.send(notificationFor(reply)));
 
   const ids = Object.keys(config.bots).join(', ');
   const inboxText = app.inbox ? `inbox ${app.inbox.localUrl}` : 'inbox off';
@@ -246,6 +248,9 @@ async function main(argv = process.argv.slice(2), env = process.env) {
 
 function runInit(argv, env) {
   try {
+    if (argv.some((token) => token === '--key' || token.startsWith('--key='))) {
+      console.error('Warning: --key is visible in the process list. Prefer BOT_WEBHOOK_KEY.');
+    }
     const result = initCommand({ argv, env });
     if (!result.wrote) {
       console.log(JSON.stringify(result.config, null, 2));
