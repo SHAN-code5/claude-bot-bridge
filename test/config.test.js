@@ -232,6 +232,27 @@ test('multiple bots require a real defaultBot and reject the shorthand mixed wit
   );
 });
 
+test('invalid JSON does not echo file contents, and /health is reserved', () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'bad.json'), '{"key":"super-secret-value"');
+  assert.throws(
+    () => loadConfig({ argv: ['--config', 'bad.json'], env: {}, cwd: dir }),
+    (err) => err instanceof ConfigError && !err.message.includes('super-secret-value') && /not valid JSON/.test(err.message)
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        env: {
+          BOT_WEBHOOK_URL: 'https://example.com/hook',
+          BOT_INBOX_PORT: '8787',
+          BOT_INBOX_PATH: '/health',
+        },
+        cwd: dir,
+      }),
+    /cannot be \/health/
+  );
+});
+
 test('a missing config path and invalid JSON say what to fix', () => {
   const dir = tempDir();
   assert.throws(

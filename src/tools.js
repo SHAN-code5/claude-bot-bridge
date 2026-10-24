@@ -21,23 +21,25 @@ function createService(options) {
   const fetchImpl = options.fetchImpl || fetch;
   const secrets = options.secrets || config.secrets || [];
   const log = options.log || { info() {}, error() {} };
-  const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const sleep = options.sleep || defaultSleep;
 
   const definitions = toolDefinitions(config);
 
-  async function call(name, args) {
+  async function call(name, args, extras = {}) {
     const input = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
     try {
       let text;
+      const signal = extras && extras.signal;
       if (name === 'list_bots') text = listBots();
-      else if (name === 'send_message') text = await sendMessage(input);
-      else if (name === 'get_replies') text = await getReplies(input);
-      else if (name === 'wait_for_reply') text = await waitForReply(input);
+      else if (name === 'send_message') text = await sendMessage(input, signal);
+      else if (name === 'get_replies') text = await getReplies(input, signal);
+      else if (name === 'wait_for_reply') text = await waitForReply(input, signal);
       else {
         return fail(`Unknown tool "${name}". Tools: ${definitions.map((tool) => tool.name).join(', ')}.`);
       }
       return ok(text);
     } catch (err) {
+      if (err && err.name === 'Cancelled') throw err;
       const message = err && err.message ? err.message : 'Unexpected error';
       log.error(`${name} failed: ${message}`);
       if (err instanceof ToolError || err instanceof HttpCallError) return fail(message);
@@ -77,7 +79,7 @@ function createService(options) {
     return lines.join('\n');
   }
 
-  async function sendMessage(args) {
+  async function sendMessage(args, signal) {
     const message = requireText(args.message, 'message');
     const context = args.context == null || args.context === ''
       ? ''
@@ -95,7 +97,8 @@ function createService(options) {
       bot: bot.id,
       replyChannels: buildReplyChannels(config, bot, threadId),
     };
-    const response = await postWebhook(bot, payload, { fetchImpl, secrets });
+    throwIfCancelled(signal);
+    const response = await postWebhook(bot, payload, { fetchImpl, secrets, signal });
     const parsed = parseReplyBody(response.text, response.contentType, {
       source: 'sync',
       bot: bot.id,
@@ -111,14 +114,14 @@ function createService(options) {
     return formatSend({ bot, threadId, messageId, status: response.status, replies: shown });
   }
 
-  async function getReplies(args) {
+  async function getReplies(args, signal) {
     const bot = args.bot == null || args.bot === '' ? null : resolveBot(config, args.bot);
     const threadId = args.threadId ? requireId(args.threadId, 'threadId') : null;
     const sinceMs = args.since == null || args.since === '' ? null : parseSince(args.since);
     const limit = clampInt(args.limit, 20, 1, 100, 'limit');
     const botsToPoll = botsForPoll(config, bot);
     const pollErrors = [];
-    await pollBots(botsToPoll, pollErrors);
+    await pollBots(botsToPoll, pollErrors, signal);
     const matched = store.list({
       bot: bot ? bot.id : null,
       threadId,
@@ -135,7 +138,7 @@ function createService(options) {
     });
   }
 
-  async function waitForReply(args) {
+  async function waitForReply(args, signal) {
     const bot = args.bot == null || args.bot === '' ? null : resolveBot(config, args.bot);
     const threadId = args.threadId ? requireId(args.threadId, 'threadId') : null;
     const timeoutMs = clampInt(args.timeoutMs == null ? 120000 : args.timeoutMs, 120000, 0, config.maxWaitMs, 'timeoutMs');
@@ -163,7 +166,8 @@ function createService(options) {
       exclude,
     });
 
-    await pollBots(botsForPoll(config, bot), pollErrors);
+    throwIfCancelled(signal);
+    await pollBots(botsForPoll(config, bot), pollErrors, signal);
     if (!includeExisting) {
       for (const reply of store.list()) {
         if (reply.source === 'poll') exclude.add(reply.id);
@@ -184,15 +188,16 @@ function createService(options) {
     const deadline = started + timeoutMs;
     let nextPollAt = Date.now() + interval;
     while (Date.now() < deadline) {
+      throwIfCancelled(signal);
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       // Inbox posts are checked on a short slice. Reply URLs use pollIntervalMs.
-      await sleep(Math.min(200, interval, remaining));
+      await sleep(Math.min(200, interval, remaining), signal);
       const duringSleep = store.nextUndelivered(filter());
       if (duringSleep) return deliver(duringSleep);
       if (Date.now() >= deadline) break;
       if (Date.now() + 20 >= nextPollAt) {
-        await pollBots(botsForPoll(config, bot), pollErrors);
+        await pollBots(botsForPoll(config, bot), pollErrors, signal);
         nextPollAt = Date.now() + interval;
         const found = store.nextUndelivered(filter());
         if (found) return deliver(found);
@@ -202,11 +207,14 @@ function createService(options) {
     return timeoutText({ timeoutMs, threadId, bot, pollErrors });
   }
 
-  async function pollBots(bots, pollErrors) {
+  async function pollBots(bots, pollErrors, signal) {
     for (const item of bots) {
+      throwIfCancelled(signal);
       try {
-        await pollReplies(item, store, { fetchImpl, secrets });
+        await pollReplies(item, store, { fetchImpl, secrets, signal });
       } catch (err) {
+        if (err && err.name === 'Cancelled') throw err;
+        if (signal && signal.aborted) throwIfCancelled(signal);
         const line = `${item.id}: ${err.message}`;
         const index = pollErrors.findIndex((entry) => entry.startsWith(`${item.id}:`));
         if (index >= 0) pollErrors[index] = line;
@@ -377,8 +385,10 @@ function requireId(value, label) {
 
 function optionalBool(value, label) {
   if (value == null) return false;
-  if (typeof value !== 'boolean') throw new ToolError(`${label} must be a boolean.`);
-  return value;
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new ToolError(`${label} must be a boolean.`);
 }
 
 function parseSince(value) {
@@ -389,7 +399,8 @@ function parseSince(value) {
 }
 
 function clampInt(value, fallback, min, max, label) {
-  if (value == null) return fallback;
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) value = Number(value);
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     throw new ToolError(`${label} must be an integer.`);
   }
@@ -401,6 +412,34 @@ function clampInt(value, fallback, min, max, label) {
 
 function newId(prefix) {
   return `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
+}
+
+function defaultSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(cancelledError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(cancelledError());
+    };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function throwIfCancelled(signal) {
+  if (signal && signal.aborted) throw cancelledError();
+}
+
+function cancelledError() {
+  const error = new Error('cancelled');
+  error.name = 'Cancelled';
+  return error;
 }
 
 function formatSend({ bot, threadId, messageId, status, replies }) {

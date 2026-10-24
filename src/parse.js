@@ -18,7 +18,10 @@ function parseReplyBody(text, contentType, defaults = {}) {
   const looksJson = type.includes('json') || trimmed.startsWith('{') || trimmed.startsWith('[');
   if (looksJson) {
     try {
-      return repliesFromJson(JSON.parse(trimmed), defaults);
+      const parsed = repliesFromJson(JSON.parse(trimmed), defaults);
+      // A text/plain file that happens to be JSON, but not a reply document,
+      // is still the reply. An advertised JSON body with no reply field is empty.
+      if (parsed.length > 0 || type.includes('json')) return parsed;
     } catch {
       if (type.includes('json')) return [];
     }
@@ -45,8 +48,12 @@ function repliesFromJson(data, defaults) {
   }
   if (typeof data !== 'object') return [];
 
-  if (Array.isArray(data.replies)) return data.replies.flatMap((item) => repliesFromJson(item, defaults));
-  if (Array.isArray(data.messages)) return data.messages.flatMap((item) => repliesFromJson(item, defaults));
+  if (Array.isArray(data.replies) && data.replies.length) {
+    return data.replies.flatMap((item) => repliesFromJson(item, defaults));
+  }
+  if (Array.isArray(data.messages) && data.messages.length) {
+    return data.messages.flatMap((item) => repliesFromJson(item, defaults));
+  }
 
   const explicit = ['reply', 'message', 'text', 'content'].some((key) =>
     Object.prototype.hasOwnProperty.call(data, key)
@@ -75,8 +82,11 @@ function one(fields, defaults) {
   const bot = fields.bot || defaults.bot || null;
   const threadId = fields.threadId || defaults.threadId || null;
   let id;
-  if (fields.id) id = `${defaults.source || 'reply'}:${bot || '_'}:${fields.id}`;
-  else if (defaults.source === 'inbox') id = `in_${crypto.randomBytes(8).toString('hex')}`;
+  if (fields.id) {
+    const base = `${defaults.source || 'reply'}:${bot || '_'}:${fields.id}`;
+    // A sync reply id is only unique for that webhook call. Bots often reuse "1".
+    id = defaults.nonce ? `${base}:${defaults.nonce}` : base;
+  } else if (defaults.source === 'inbox') id = `in_${crypto.randomBytes(8).toString('hex')}`;
   else id = hashId(defaults.source, bot, threadId, text, fields.at, defaults.nonce);
 
   return {
@@ -90,10 +100,26 @@ function one(fields, defaults) {
   };
 }
 
+function primitiveText(value) {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
+}
+
 function firstString(...values) {
   for (const value of values) {
-    if (typeof value === 'string' && value.trim()) return value.trim();
-    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+    const direct = primitiveText(value);
+    if (direct) return direct;
+  }
+  // One level deep, for shapes like { "content": { "text": "..." } }.
+  for (const value of values) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const nested =
+      primitiveText(value.text) ||
+      primitiveText(value.content) ||
+      primitiveText(value.message) ||
+      primitiveText(value.reply);
+    if (nested) return nested;
   }
   return null;
 }

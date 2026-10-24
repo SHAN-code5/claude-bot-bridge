@@ -375,7 +375,8 @@ The bridge forwards text. It does not give the bot a way to call tools inside Cl
 - A reply URL is snapshotted at the start of a wait. Older contents stay available through `get_replies`.
 - Plain-text reply files have no thread id. Two conversations will share them. Use the JSON shape above when that matters.
 - Replies are kept in memory (the latest 1000) until the process exits. Claude Desktop starts a new process when it relaunches. Set `stateFile` to keep them.
-- Payloads are text. There are no attachments. `message` and `context` are capped at 100,000 characters. Inbox bodies are capped at 256 KiB.
+- Payloads are text. There are no attachments. `message` and `context` are capped at 100,000 characters. Inbox bodies are capped at 256 KiB. A webhook or reply-URL body larger than 1 MiB is rejected.
+- The MCP client can cancel `wait_for_reply`. The bridge stops that call instead of blocking later tools until the timeout.
 - One inbox serves every bot. Send the bot id in the POST if more than one bot replies there.
 - Timestamps in tool results are ISO-8601 UTC.
 

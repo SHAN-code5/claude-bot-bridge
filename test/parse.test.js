@@ -68,6 +68,24 @@ test('the same sync text from two sends is stored separately', () => {
   assert.notEqual(first[0].id, second[0].id);
 });
 
+test('plain text that merely looks like JSON is kept, and nested reply fields are read', () => {
+  const textFile = parseReplyBody('{"status":"draft saved"}', 'text/plain', { source: 'poll', bot: 'assistant' });
+  assert.equal(textFile.length, 1);
+  assert.equal(textFile[0].text, '{"status":"draft saved"}');
+
+  const emptyList = parseReplyBody('{"replies":[],"message":"still here"}', 'application/json', {
+    source: 'poll',
+    bot: 'assistant',
+  });
+  assert.equal(emptyList[0].text, 'still here');
+
+  const nested = parseReplyBody('{"content":{"text":"nested hello"}}', 'application/json', {
+    source: 'sync',
+    bot: 'assistant',
+  });
+  assert.equal(nested[0].text, 'nested hello');
+});
+
 test('inbox replies without an id are unique', () => {
   const first = parseReplyBody('{"message":"same"}', 'application/json', { source: 'inbox' });
   const second = parseReplyBody('{"message":"same"}', 'application/json', { source: 'inbox' });

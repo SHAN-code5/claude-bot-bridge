@@ -35,6 +35,17 @@ test('accepts authenticated replies, rejects bad tokens, and ignores duplicates'
     assert.equal(deniedBody.includes('inbox-secret-value'), false);
     assert.equal(deniedBody.includes('wrong-token-value'), false);
 
+    const either = await fetch(inbox.localUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer wrong-token-value',
+        'X-Bridge-Token': 'inbox-secret-value',
+      },
+      body: JSON.stringify({ message: 'either header', threadId: 'thr_either' }),
+    });
+    assert.equal(either.status, 202);
+
     const headerToken = await fetch(inbox.localUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': 'inbox-secret-value' },
@@ -51,8 +62,9 @@ test('accepts authenticated replies, rejects bad tokens, and ignores duplicates'
     });
     assert.equal(again.status, 200);
     assert.equal((await again.json()).duplicate, true);
-    assert.equal(store.list().length, 1);
-    assert.equal(store.list()[0].text, 'from header');
+    assert.equal(store.list().length, 2);
+    assert.equal(store.list().some((reply) => reply.text === 'from header'), true);
+    assert.equal(store.list().some((reply) => reply.text === 'either header'), true);
     assert.equal(logs.join('\n').includes('inbox-secret-value'), false);
 
     const bad = await fetch(inbox.localUrl, {

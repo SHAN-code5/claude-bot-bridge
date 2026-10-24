@@ -109,7 +109,10 @@ function readConfigFile(configPath, readFileSync, env) {
   try {
     parsed = JSON.parse(text);
   } catch (err) {
-    throw new ConfigError(`Config file is not valid JSON (${configPath}). ${err.message}`);
+    const position = err && typeof err.message === 'string' ? /position\s+(\d+)/i.exec(err.message) : null;
+    throw new ConfigError(
+      `Config file is not valid JSON (${configPath})${position ? ` at position ${position[1]}` : ''}.`
+    );
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new ConfigError(`Config file must contain a JSON object (${configPath}).`);
@@ -198,7 +201,11 @@ function applyEnv(cfg, env) {
     try {
       parsed = JSON.parse(env.CLAUDE_BOT_BRIDGE_BOTS);
     } catch (err) {
-      throw new ConfigError(`CLAUDE_BOT_BRIDGE_BOTS is not valid JSON. ${err.message}`);
+      if (err instanceof ConfigError) throw err;
+      const position = err && typeof err.message === 'string' ? /position\s+(\d+)/i.exec(err.message) : null;
+      throw new ConfigError(
+        `CLAUDE_BOT_BRIDGE_BOTS is not valid JSON${position ? ` at position ${position[1]}` : ''}.`
+      );
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new ConfigError('CLAUDE_BOT_BRIDGE_BOTS must be a JSON object of bot id → settings.');
@@ -314,6 +321,9 @@ function validate(cfg) {
     if (cfg.inbox.host.length > 255) throw new ConfigError('inbox.host is too long.');
     if (!/^\/[A-Za-z0-9._~/-]*$/.test(cfg.inbox.path)) {
       throw new ConfigError('inbox.path must start with "/" and contain only URL path characters.');
+    }
+    if (cfg.inbox.path === '/health') {
+      throw new ConfigError('inbox.path cannot be /health. That path is the inbox health check.');
     }
   }
 

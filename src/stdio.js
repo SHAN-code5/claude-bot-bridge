@@ -13,11 +13,6 @@ function createLineReader(onMessage, onOverflow) {
   return {
     push(chunk) {
       buf += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-      if (buf.length > MAX_BUFFER) {
-        buf = '';
-        chain = chain.then(() => (onOverflow ? onOverflow() : undefined));
-        return chain;
-      }
       const lines = [];
       let splitAt = buf.indexOf('\n');
       while (splitAt >= 0) {
@@ -26,6 +21,10 @@ function createLineReader(onMessage, onOverflow) {
         if (line.endsWith('\r')) line = line.slice(0, -1);
         if (line.trim()) lines.push(line.trim());
         splitAt = buf.indexOf('\n');
+      }
+      if (buf.length > MAX_BUFFER) {
+        buf = '';
+        chain = chain.catch(() => {}).then(() => (onOverflow ? onOverflow() : undefined));
       }
       for (const line of lines) {
         chain = chain.catch(() => {}).then(() => onMessage(line));
