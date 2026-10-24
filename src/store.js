@@ -5,6 +5,7 @@ const path = require('node:path');
 const { redact } = require('./redact');
 
 const MAX_REPLIES = 1000;
+const SAVE_DELAY_MS = 50;
 
 class ReplyStore {
   constructor(options = {}) {
@@ -13,6 +14,8 @@ class ReplyStore {
     this.max = options.max || MAX_REPLIES;
     this.items = [];
     this.seen = new Set();
+    this.saveTimer = null;
+    this.onError = options.onError || ((err) => console.error(`claude-bot-bridge: ${err.message}`));
     if (this.file) this.load();
   }
 
@@ -49,6 +52,14 @@ class ReplyStore {
         delivered: Boolean(reply.delivered),
       });
     }
+    this.trim();
+  }
+
+  trim() {
+    while (this.items.length > this.max) {
+      const dropped = this.items.shift();
+      this.seen.delete(dropped.id);
+    }
   }
 
   add(reply) {
@@ -68,10 +79,7 @@ class ReplyStore {
     if (!stored.text.trim()) return null;
     this.seen.add(stored.id);
     this.items.push(stored);
-    while (this.items.length > this.max) {
-      const dropped = this.items.shift();
-      this.seen.delete(dropped.id);
-    }
+    this.trim();
     this.save();
     return stored;
   }
@@ -112,7 +120,28 @@ class ReplyStore {
     return [...map.values()].map((row) => ({ ...row, bots: [...row.bots] }));
   }
 
+  /**
+   * Schedule a write. A burst of replies or deliveries becomes one rewrite of
+   * the file instead of one per change. close() and flush() write at once.
+   */
   save() {
+    if (!this.file || this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      // A failed background write (disk full, permissions) must not crash the
+      // server. The replies stay in memory and the next change retries.
+      try {
+        this.flush();
+      } catch (err) {
+        this.onError(new Error(`could not write state file ${this.file}: ${err.message}`));
+      }
+    }, SAVE_DELAY_MS);
+  }
+
+  flush() {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
     if (!this.file) return;
     const dir = path.dirname(this.file);
     fs.mkdirSync(dir, { recursive: true });

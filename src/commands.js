@@ -6,7 +6,9 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { loadConfig } = require('./config');
 const { postWebhook } = require('./webhook');
+const { probeSse } = require('./sse');
 const { zipStore } = require('./zip');
+const { redact } = require('./redact');
 
 const pkg = require('../package.json');
 
@@ -49,6 +51,7 @@ function buildDesktopEntry({ url, key, name, replyUrl, sseUrl, from, entry }) {
 function initCommand(options) {
   const argv = options.argv || [];
   const flags = parseFlags(argv);
+  requireFlagValues(flags, ['url', 'key', 'name', 'reply-url', 'sse-url', 'from', 'config', 'config-path']);
   const platform = options.platform || process.platform;
   const homedir = options.homedir || os.homedir();
   const env = options.env || {};
@@ -99,18 +102,32 @@ function initCommand(options) {
     return { path: target, config: current, wrote: false };
   }
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, `${JSON.stringify(current, null, 2)}\n`);
+  let backup = null;
+  if (fs.existsSync(target)) {
+    backup = `${target}.bak`;
+    fs.copyFileSync(target, backup);
+    chmodPrivate(backup);
+  }
+  // Write beside the target and rename, so a crash cannot leave half a config.
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(tmp, target);
+  chmodPrivate(target);
+  return { path: target, config: current, wrote: true, backup };
+}
+
+function chmodPrivate(file) {
   try {
-    fs.chmodSync(target, 0o600);
+    fs.chmodSync(file, 0o600);
   } catch {
     // Windows may refuse the mode. The file is still written.
   }
-  return { path: target, config: current, wrote: true };
 }
 
 async function doctorCommand(options) {
   const env = options.env || process.env;
   const flags = parseFlags(options.argv || []);
+  requireFlagValues(flags, ['config']);
   const config = options.config || loadConfig({ configPath: flags.config, env, cwd: options.cwd || process.cwd() });
   const fetchImpl = options.fetchImpl || fetch;
   const checks = [];
@@ -149,7 +166,8 @@ async function doctorCommand(options) {
       }
     }
     if (bot.sseUrl) {
-      checks.push({ name: `sse ${bot.id}`, ok: true, detail: bot.sseUrl });
+      const result = await probeSse(bot, { fetchImpl, timeoutMs: probe.timeoutMs });
+      checks.push({ name: `sse ${bot.id}`, ok: result.ok, detail: redact(result.detail, config.secrets) });
     }
   }
   if (config.inbox.enabled) {
@@ -261,6 +279,16 @@ function parseFlags(argv) {
   return out;
 }
 
+/**
+ * parseFlags turns "--key" with nothing after it into true. For flags that
+ * need a value, that is a mistake to report, not a value to write.
+ */
+function requireFlagValues(flags, names) {
+  for (const name of names) {
+    if (flags[name] === true) throw new Error(`Missing value for --${name}.`);
+  }
+}
+
 function walk(root, directories) {
   const found = [];
   for (const directory of directories) {
@@ -290,4 +318,5 @@ module.exports = {
   packCommand,
   startTunnel,
   parseFlags,
+  requireFlagValues,
 };

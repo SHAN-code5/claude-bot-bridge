@@ -3,8 +3,11 @@
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { notificationFor } = require('./runtime');
+const { loopbackHostHeader } = require('./policy');
 
-function startHttpTransport({ handler, runtime, host, port, token, allowedOrigins, log }) {
+const LOOPBACK_BINDS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+function startHttpTransport({ handler, createSessionHandler, runtime, host, port, token, allowedOrigins, log }) {
   const sessions = new Map();
   const maxSessions = 100;
   runtime.subscribe((reply) => {
@@ -13,7 +16,8 @@ function startHttpTransport({ handler, runtime, host, port, token, allowedOrigin
   });
 
   const server = http.createServer((req, res) => {
-    handle(req, res, { handler, sessions, maxSessions, token, allowedOrigins, host, log }).catch((err) => {
+    const ctx = { handler, createSessionHandler, sessions, maxSessions, token, allowedOrigins, host, log };
+    handle(req, res, ctx).catch((err) => {
       if (log) log.error(err.message || 'http transport failure');
       if (!res.headersSent) {
         const status = err && err.status === 413 ? 413 : 500;
@@ -45,6 +49,11 @@ async function handle(req, res, ctx) {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   if (url.pathname !== '/mcp') {
     sendJson(res, 404, { error: 'Not found' });
+    return;
+  }
+  // On a loopback bind, a Host other than loopback means DNS rebinding.
+  if (LOOPBACK_BINDS.has(ctx.host) && !loopbackHostHeader(req.headers.host)) {
+    sendJson(res, 403, { error: 'Host is not allowed' });
     return;
   }
   if (!originAllowed(req.headers.origin, ctx.allowedOrigins)) {
@@ -94,7 +103,14 @@ async function handle(req, res, ctx) {
     sendJson(res, 400, { error: 'Mcp-Session-Id is required' });
     return;
   }
-  if (isInitialize) session = createSession(ctx.sessions, ctx.maxSessions);
+  if (isInitialize) {
+    session = createSession(ctx.sessions, ctx.maxSessions, ctx.createSessionHandler ? ctx.createSessionHandler() : ctx.handler);
+  }
+
+  if (message && message.method === 'notifications/cancelled') {
+    const requestId = message.params ? message.params.requestId : undefined;
+    if (requestId != null) session.cancel(String(requestId));
+  }
 
   const hasId = message.id !== undefined && message.id !== null;
   const isRequest = hasId && typeof message.method === 'string' && !message.method.startsWith('notifications/');
@@ -104,7 +120,26 @@ async function handle(req, res, ctx) {
     return;
   }
 
-  const response = await ctx.handler(message);
+  // The request stops when the client cancels it or goes away, instead of
+  // running a long wait_for_reply to its timeout for nobody.
+  const controller = new AbortController();
+  const key = String(message.id);
+  session.inflight.set(key, controller);
+  const onClose = () => {
+    if (!res.writableEnded) controller.abort();
+  };
+  res.on('close', onClose);
+  let response;
+  try {
+    response = await session.handler(message, controller.signal);
+  } catch (err) {
+    if (!(err && err.name === 'Cancelled')) throw err;
+    response = { jsonrpc: '2.0', id: message.id, error: { code: -32800, message: 'Request cancelled' } };
+  } finally {
+    if (session.inflight.get(key) === controller) session.inflight.delete(key);
+    res.removeListener('close', onClose);
+  }
+  if (res.destroyed || res.writableEnded) return;
   if (isInitialize && session) res.setHeader('Mcp-Session-Id', session.id);
   sendJson(res, 200, response);
 }
@@ -142,19 +177,31 @@ function endSession(req, res, ctx) {
     sendJson(res, 404, { error: 'Session not found' });
     return;
   }
+  ctx.sessions.get(id).cancelAll();
   ctx.sessions.delete(id);
   res.writeHead(204);
   res.end();
 }
 
-function createSession(sessions, maxSessions) {
+function createSession(sessions, maxSessions, handler) {
   while (sessions.size >= maxSessions) {
     const oldest = sessions.keys().next().value;
+    sessions.get(oldest).cancelAll();
     sessions.delete(oldest);
   }
   const clients = new Set();
+  const inflight = new Map();
   const session = {
     id: crypto.randomBytes(16).toString('hex'),
+    handler,
+    inflight,
+    cancel(requestId) {
+      const controller = inflight.get(requestId);
+      if (controller) controller.abort();
+    },
+    cancelAll() {
+      for (const controller of inflight.values()) controller.abort();
+    },
     send(message) {
       const chunk = `event: message\ndata: ${JSON.stringify(message)}\n\n`;
       for (const client of clients) {

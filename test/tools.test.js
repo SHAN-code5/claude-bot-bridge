@@ -44,7 +44,7 @@ test('send_message returns a synchronous reply and does not repeat it', async ()
 
     const waited = await service.call('wait_for_reply', { threadId: 'thr_demo', timeoutMs: 0 });
     assert.equal(waited.isError, false);
-    assert.match(waited.content[0].text, /no reply URL or inbox/i);
+    assert.match(waited.content[0].text, /no reply URL, SSE stream, or inbox/i);
     assert.equal(waited.content[0].text.includes('pong'), false);
   } finally {
     await webhook.close();

@@ -13,6 +13,7 @@ const {
   packCommand,
   startTunnel,
   parseFlags,
+  requireFlagValues,
 } = require('./commands');
 
 const pkg = require('../package.json');
@@ -136,8 +137,10 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     }
   }
 
+  // tools/call runs one at a time so a wait cannot overlap a send. Everything
+  // else (ping, tools/list, resources) answers at once, even during a long wait.
   const queue = [];
-  const cancelled = new Set();
+  const immediate = new Set();
   let inflight = null;
   let draining = false;
   let drainPromise = Promise.resolve();
@@ -149,8 +152,35 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   function noteCancel(message) {
     const requestId = message && message.params ? message.params.requestId : undefined;
     if (requestId == null) return;
-    cancelled.add(String(requestId));
-    if (inflight && sameId(inflight.id, requestId)) inflight.controller.abort();
+    if (inflight && sameId(inflight.id, requestId)) {
+      inflight.controller.abort();
+      return;
+    }
+    const index = queue.findIndex((item) => item && typeof item === 'object' && sameId(item.id, requestId));
+    if (index >= 0) queue.splice(index, 1);
+  }
+
+  async function respond(message, signal) {
+    const response = await handler(message, signal);
+    if (signal && signal.aborted) return;
+    if (response) write(response);
+    if (message.method === 'initialize' && response) outbound.markReady();
+  }
+
+  function handleNow(message) {
+    const job = respond(message).catch((err) => {
+      if (message.id != null) {
+        write({
+          jsonrpc: '2.0',
+          id: message.id,
+          error: { code: -32603, message: redact(err && err.message ? err.message : 'Internal error', config.secrets) },
+        });
+      } else {
+        log.error(err && err.message ? err.message : 'failed to handle message');
+      }
+    });
+    immediate.add(job);
+    job.finally(() => immediate.delete(job));
   }
 
   function drain() {
@@ -163,17 +193,10 @@ async function main(argv = process.argv.slice(2), env = process.env) {
           write({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request' } });
           continue;
         }
-        if (message.id != null && cancelled.has(String(message.id))) {
-          cancelled.delete(String(message.id));
-          continue;
-        }
         const controller = new AbortController();
         if (message.id != null) inflight = { id: message.id, controller };
         try {
-          const response = await handler(message, controller.signal);
-          if (controller.signal.aborted) continue;
-          if (response) write(response);
-          if (message.method === 'initialize' && response) outbound.markReady();
+          await respond(message, controller.signal);
         } catch (err) {
           if (err && err.name === 'Cancelled') continue;
           if (message.id != null && !controller.signal.aborted) {
@@ -212,6 +235,10 @@ async function main(argv = process.argv.slice(2), env = process.env) {
       noteCancel(message);
       return;
     }
+    if (message && typeof message === 'object' && message.method !== 'tools/call') {
+      handleNow(message);
+      return;
+    }
     if (message && message.method === 'tools/call' && message.params && message.params.name === 'stop_relay') {
       runtime.requestStopRelay();
     }
@@ -229,7 +256,8 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     });
   });
   process.stdin.on('end', () => {
-    reader.idle.then(() => drainPromise, () => drainPromise).then(() => shutdown(0), () => shutdown(0));
+    const settled = () => Promise.all([drainPromise, ...immediate]);
+    reader.idle.then(settled, settled).then(() => shutdown(0), () => shutdown(0));
   });
   process.stdin.on('error', () => shutdown(0));
   process.stdout.on('error', () => shutdown(0));
@@ -257,6 +285,7 @@ function runInit(argv, env) {
       return;
     }
     console.log(`Wrote Claude Desktop config: ${result.path}`);
+    if (result.backup) console.log(`Previous config saved as ${result.backup}`);
     console.log('Quit Claude Desktop completely, then open it again.');
   } catch (err) {
     console.error(err.message);
@@ -280,6 +309,7 @@ async function runDoctor(argv, env) {
 function runPack(argv) {
   try {
     const flags = parseFlags(argv);
+    requireFlagValues(flags, ['out']);
     const result = packCommand({ out: flags.out });
     console.log(`Wrote ${result.out}`);
   } catch (err) {
@@ -291,6 +321,7 @@ function runPack(argv) {
 async function runTunnel(argv, env) {
   try {
     const flags = parseFlags(argv);
+    requireFlagValues(flags, ['config']);
     const config = loadConfig({ configPath: flags.config, env, cwd: process.cwd() });
     if (!config.inbox.enabled) {
       throw new Error('Set BOT_INBOX_PORT before opening a tunnel. The inbox is what the bot posts replies to.');
@@ -305,16 +336,26 @@ async function runTunnel(argv, env) {
 }
 
 async function runHttp(argv, env) {
-  const flags = parseFlags(argv);
+  let flags;
   let config;
   try {
+    flags = parseFlags(argv);
+    requireFlagValues(flags, ['config', 'host', 'port', 'token']);
     config = loadConfig({ configPath: flags.config, env, cwd: process.cwd() });
   } catch (err) {
     console.error(err.message);
     process.exit(1);
   }
+  if (flags.token) {
+    console.error('Warning: --token is visible in the process list. Prefer MCP_HTTP_TOKEN.');
+    config.secrets.push(flags.token);
+  }
   const host = flags.host || '127.0.0.1';
   const port = flags.port ? Number(flags.port) : 8080;
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    console.error('--port must be an integer from 0 to 65535.');
+    process.exit(1);
+  }
   const token = flags.token || config.http.token;
   if (!['127.0.0.1', 'localhost', '::1'].includes(host) && !token) {
     console.error('Refusing to listen beyond localhost without MCP_HTTP_TOKEN or --token.');
@@ -334,6 +375,7 @@ async function runHttp(argv, env) {
     app = await createApp({ config, log, instructions: INSTRUCTIONS });
     const httpServer = await startHttpTransport({
       handler: app.handler,
+      createSessionHandler: app.createSessionHandler,
       runtime: app.runtime,
       host,
       port,
@@ -354,9 +396,11 @@ async function runHttp(argv, env) {
 }
 
 async function runDashboard(argv, env) {
-  const flags = parseFlags(argv);
+  let flags;
   let config;
   try {
+    flags = parseFlags(argv);
+    requireFlagValues(flags, ['config', 'host', 'port']);
     config = loadConfig({ configPath: flags.config, env, cwd: process.cwd() });
   } catch (err) {
     console.error(err.message);

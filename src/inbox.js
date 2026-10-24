@@ -85,9 +85,21 @@ async function handle(req, res, ctx) {
     sendJson(res, 405, { ok: false, error: 'Use POST' });
     return;
   }
+  // Bots do not send Origin. A browser always does on POST, so this stops a web
+  // page from writing a fake reply into a tokenless loopback inbox.
+  if (req.headers.origin) {
+    ctx.log.info('inbox rejected a browser request');
+    sendJson(res, 403, { ok: false, error: 'Browser requests are not accepted' });
+    return;
+  }
   if (ctx.token && !tokenOk(req, ctx.token)) {
     ctx.log.info('inbox rejected a request');
     sendJson(res, 401, { ok: false, error: 'Unauthorized' });
+    return;
+  }
+
+  if (!isJsonType(req.headers['content-type'])) {
+    sendJson(res, 415, { ok: false, error: 'Content-Type must be application/json' });
     return;
   }
 
@@ -146,6 +158,11 @@ function tokenOk(req, token) {
   const header = req.headers['x-bridge-token'];
   if (typeof header === 'string' && header.trim()) candidates.push(header.trim());
   return candidates.some((value) => safeEqual(value, token));
+}
+
+function isJsonType(value) {
+  const type = String(value || '').split(';')[0].trim().toLowerCase();
+  return type === 'application/json' || /^application\/[a-z0-9.-]+\+json$/.test(type);
 }
 
 function oneLine(value) {

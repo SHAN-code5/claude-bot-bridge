@@ -527,6 +527,7 @@ function collectSecrets(cfg) {
   const secrets = [];
   for (const bot of Object.values(cfg.bots || {})) {
     if (typeof bot.key === 'string') secrets.push(bot.key);
+    if (typeof bot.signingSecret === 'string') secrets.push(bot.signingSecret);
   }
   if (cfg.inbox && typeof cfg.inbox.token === 'string') secrets.push(cfg.inbox.token);
   if (cfg.inbox && typeof cfg.inbox.signingSecret === 'string') secrets.push(cfg.inbox.signingSecret);

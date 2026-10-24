@@ -1,10 +1,15 @@
 'use strict';
 
 const http = require('node:http');
+const { loopbackHostHeader } = require('./policy');
 
 function startDashboard({ store, config, host, port, log }) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
+    if (!loopbackHostHeader(req.headers.host)) {
+      send(res, 403, 'text/plain', 'Host is not allowed');
+      return;
+    }
     if (req.method !== 'GET') {
       send(res, 405, 'text/plain', 'Use GET');
       return;

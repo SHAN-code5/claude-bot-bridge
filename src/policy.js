@@ -30,19 +30,36 @@ function hostAllowed(urlValue, allowedHosts) {
   } catch {
     return false;
   }
-  return allowedHosts.some((entry) => entry === url.hostname || entry === url.host);
+  return allowedHosts.some((entry) => {
+    const wanted = String(entry).trim().toLowerCase();
+    return wanted === url.hostname || wanted === url.host;
+  });
 }
 
+const LOOPBACK_NAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+/**
+ * True when a Host header names the loopback interface. A DNS-rebinding page
+ * reaches a loopback server with its own hostname in Host, so this rejects it.
+ */
+function loopbackHostHeader(value) {
+  if (typeof value !== 'string') return false;
+  const match = /^(\[[^\]]+\]|[^:\[\]]+)(?::\d{1,5})?$/.exec(value.trim().toLowerCase());
+  return Boolean(match) && LOOPBACK_NAMES.has(match[1]);
+}
+
+// A POST is only retried when the bot cannot have acted on it: it said so
+// (429, 503), or the connection failed before the request was sent. A timeout
+// or a 502/504 may come after the bot already handled the message.
 function isRetryableStatus(status) {
-  return status === 429 || status === 502 || status === 503 || status === 504;
+  return status === 429 || status === 503;
 }
 
 function isRetryableError(err) {
   if (!err) return false;
   if (err.name === 'Cancelled') return false;
-  if (err.status && isRetryableStatus(err.status)) return true;
-  if (err.status) return false;
-  return /timed out|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|socket/i.test(err.message || '');
+  if (err.status) return isRetryableStatus(err.status);
+  return err.notSent === true;
 }
 
 async function sendWithPolicy({ bot, payload, fetchImpl, secrets, signal, rate, config }) {
@@ -90,4 +107,4 @@ function delayFor(ms, signal) {
   });
 }
 
-module.exports = { RateLimiter, hostAllowed, sendWithPolicy, isRetryableStatus };
+module.exports = { RateLimiter, hostAllowed, loopbackHostHeader, sendWithPolicy, isRetryableStatus, isRetryableError };

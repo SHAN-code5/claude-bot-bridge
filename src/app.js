@@ -2,7 +2,8 @@
 
 const { ReplyStore } = require('./store');
 const { startInbox, advertisedUrl } = require('./inbox');
-const { createService } = require('./tools');
+const { createService, sessionDelivery } = require('./tools');
+const { RateLimiter } = require('./policy');
 const { createHandler } = require('./mcp');
 const { createResources } = require('./resources');
 const { createRuntime } = require('./runtime');
@@ -14,7 +15,7 @@ const pkg = require('../package.json');
 async function createApp({ config, log, instructions, fetchImpl }) {
   let store;
   try {
-    store = new ReplyStore({ file: config.stateFile, secrets: config.secrets });
+    store = new ReplyStore({ file: config.stateFile, secrets: config.secrets, onError: (err) => log.error(err.message) });
   } catch (err) {
     throw new Error(err.message);
   }
@@ -53,15 +54,22 @@ async function createApp({ config, log, instructions, fetchImpl }) {
     fetchImpl,
     onReply: (reply) => runtime.emit(reply),
   });
-  const service = createService({ config, store, log, secrets: config.secrets, fetchImpl, runtime });
+  // Shared by every service so HTTP sessions cannot multiply the rate limit.
+  const rateLimiter = new RateLimiter(config.rateLimitPerMinute || 0);
+  const etags = new Map();
+  const serviceFor = (delivery) =>
+    createService({ config, store, log, secrets: config.secrets, fetchImpl, runtime, rateLimiter, etags, delivery });
   const resources = createResources(store, config);
-  const handler = createHandler({
-    service,
-    resources,
-    secrets: config.secrets,
-    serverInfo: { name: pkg.name, version: pkg.version },
-    instructions,
-  });
+  const handlerFor = (service) =>
+    createHandler({
+      service,
+      resources,
+      secrets: config.secrets,
+      serverInfo: { name: pkg.name, version: pkg.version },
+      instructions,
+    });
+  const service = serviceFor(undefined);
+  const handler = handlerFor(service);
 
   let dashboard = null;
   if (config.dashboard && config.dashboard.enabled) {
@@ -84,12 +92,24 @@ async function createApp({ config, log, instructions, fetchImpl }) {
     handler,
     runtime,
     dashboard,
+    // One handler per HTTP session, each with its own delivery tracking.
+    createSessionHandler() {
+      return handlerFor(serviceFor(sessionDelivery(store)));
+    },
     async close() {
       const jobs = [];
       if (inbox) jobs.push(inbox.close());
       if (dashboard) jobs.push(dashboard.close());
       jobs.push(sse.close());
-      await Promise.all(jobs);
+      try {
+        await Promise.all(jobs);
+      } finally {
+        try {
+          store.flush();
+        } catch (err) {
+          log.error(`could not write state file: ${err.message}`);
+        }
+      }
     },
   };
 }

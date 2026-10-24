@@ -2,6 +2,7 @@
 
 const { parseReplyBody } = require('./parse');
 const { signHeaders } = require('./signing');
+const { headerGet } = require('./webhook');
 
 function startSseClients({ config, store, log, fetchImpl, onReply, signal }) {
   const stops = [];
@@ -35,44 +36,67 @@ function followBot(bot, options) {
   };
 }
 
+const STOP_CODES = new Set(['SSE_AUTH', 'SSE_REDIRECT', 'SSE_TYPE']);
+
 async function readLoop(bot, signal, options) {
   let delay = 500;
   while (!signal.aborted) {
+    let events = 0;
     try {
-      await readOnce(bot, signal, options);
-      delay = 500;
+      events = await readOnce(bot, signal, options);
     } catch (err) {
       if (signal.aborted || (err && err.name === 'AbortError')) return;
-      if (err && (err.code === 'SSE_AUTH' || err.code === 'SSE_REDIRECT')) {
+      if (err && STOP_CODES.has(err.code)) {
         if (options.log) options.log.error(`sse ${bot.id} stopped: ${err.message}`);
         return;
       }
       if (options.log) options.log.error(`sse ${bot.id} disconnected: ${err.message || err}`);
-      await wait(delay, signal);
-      delay = Math.min(delay * 2, 15000);
     }
+    // Always pause before reconnecting. A stream that closes at once without
+    // sending an event backs off instead of hammering the bot.
+    if (events > 0) delay = 500;
+    await wait(delay, signal);
+    delay = Math.min(delay * 2, 15000);
   }
 }
 
-async function readOnce(bot, signal, options) {
+function sseHeaders(bot) {
   const headers = { Accept: 'text/event-stream', 'Cache-Control': 'no-cache' };
   if (bot.key) headers[bot.keyHeader] = `${bot.keyPrefix}${bot.key}`;
   if (bot.signingSecret) Object.assign(headers, signHeaders(bot.signingSecret, ''));
-  const response = await options.fetchImpl(bot.sseUrl, { method: 'GET', headers, redirect: 'manual', signal });
+  return headers;
+}
+
+async function openStream(bot, signal, fetchImpl) {
+  const response = await fetchImpl(bot.sseUrl, { method: 'GET', headers: sseHeaders(bot), redirect: 'manual', signal });
+  let error = null;
   if (response.status === 401 || response.status === 403 || (response.status >= 300 && response.status < 400)) {
-    const error = new Error(`HTTP ${response.status}`);
+    error = new Error(`HTTP ${response.status}`);
     error.code = response.status < 400 ? 'SSE_REDIRECT' : 'SSE_AUTH';
+  } else if (response.status < 200 || response.status >= 300) {
+    error = new Error(`HTTP ${response.status}`);
+  } else {
+    const type = headerGet(response, 'content-type');
+    if (type && !/^text\/event-stream\b/i.test(type.trim())) {
+      error = new Error(`Content-Type is ${type.split(';')[0].trim()}, not text/event-stream`);
+      error.code = 'SSE_TYPE';
+    } else if (!response.body || typeof response.body.getReader !== 'function') {
+      error = new Error('SSE response has no body');
+    }
+  }
+  if (error) {
+    await discard(response);
     throw error;
   }
-  if (response.status < 200 || response.status >= 300) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-  if (!response.body || typeof response.body.getReader !== 'function') {
-    throw new Error('SSE response has no body');
-  }
+  return response;
+}
+
+async function readOnce(bot, signal, options) {
+  const response = await openStream(bot, signal, options.fetchImpl);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let events = 0;
   while (!signal.aborted) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -83,12 +107,40 @@ async function readOnce(bot, signal, options) {
       continue;
     }
     buffer = consumeEvents(buffer, (event) => {
+      events += 1;
       const replies = parseReplyBody(event.data, 'application/json', { source: 'sse', bot: bot.id });
       for (const reply of replies) {
         const saved = options.store.add(reply);
         if (saved && options.onReply) options.onReply(saved);
       }
     });
+  }
+  return events;
+}
+
+/**
+ * Connect once and check the stream answers like SSE. Used by doctor.
+ */
+async function probeSse(bot, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await openStream(bot, controller.signal, fetchImpl);
+    await discard(response);
+    return { ok: true, detail: `HTTP ${response.status} text/event-stream` };
+  } catch (err) {
+    const timedOut = err && (err.name === 'AbortError' || err.name === 'TimeoutError');
+    return { ok: false, detail: timedOut ? `request timed out after ${timeoutMs}ms` : err.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function discard(response) {
+  try {
+    if (response.body && typeof response.body.cancel === 'function') await response.body.cancel();
+  } catch {
+    // Nothing left to release.
   }
 }
 
@@ -114,16 +166,16 @@ function wait(ms, signal) {
       resolve();
       return;
     }
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true }
-    );
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
   });
 }
 
-module.exports = { startSseClients, consumeEvents };
+module.exports = { startSseClients, consumeEvents, probeSse };

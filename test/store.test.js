@@ -50,6 +50,9 @@ test('dedupes, filters, marks delivered, and redacts secrets in the state file',
   store.markDelivered('r1');
   assert.equal(store.nextUndelivered({ threadId: 'thr_a' }).id, 'r3');
 
+  // Writes are coalesced; flush() is what close() calls.
+  assert.equal(fs.existsSync(file), false);
+  store.flush();
   const restored = new ReplyStore({ file, secrets });
   if (process.platform !== 'win32') {
     const mode = fs.statSync(file).mode & 0o777;
