@@ -296,7 +296,7 @@ test('a repeated sync reply id is kept, huge bodies are rejected, and string num
     assert.match(second.content[0].text, /same words/);
     const replies = await service.call('get_replies', { threadId: 'thr_same', limit: '10' });
     assert.match(replies.content[0].text, /2 replies/);
-    assert.equal(store.list({ threadId: 'thr_same' }).length, 2);
+    assert.equal(store.list({ threadId: 'thr_same', excludeSources: ['sent'] }).length, 2);
 
     const waited = await service.call('wait_for_reply', {
       threadId: 'thr_same',

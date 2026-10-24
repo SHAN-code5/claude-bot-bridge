@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Test
+        run: npm test
+      - name: Pack the Desktop Extension
+        run: node bin/claude-bot-bridge.js pack --out dist/claude-bot-bridge.mcpb
+      - name: GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/claude-bot-bridge.mcpb
+          generate_release_notes: true
+      - name: Publish to npm
+        if: env.NODE_AUTH_TOKEN != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { redact } = require('./redact');
+const { hostAllowed } = require('./policy');
 
 class ConfigError extends Error {
   constructor(message) {
@@ -127,12 +128,19 @@ function emptyConfig() {
     stateFile: null,
     maxWaitMs: 180000,
     timeoutMs: 30000,
+    allowedHosts: [],
+    rateLimitPerMinute: 30,
+    maxRetries: 2,
+    retryBaseMs: 250,
+    dashboard: { enabled: false, host: '127.0.0.1', port: 8790 },
+    http: { host: '127.0.0.1', port: 8080, token: null, allowedOrigins: [] },
     inbox: {
       enabled: false,
       host: '127.0.0.1',
       port: 8787,
       path: '/reply',
       token: null,
+      signingSecret: null,
       publicUrl: null,
       localUrl: null,
       advertisedUrl: null,
@@ -153,6 +161,15 @@ function normalizeFile(raw) {
   if (typeof raw.stateFile === 'string' && raw.stateFile.trim()) cfg.stateFile = raw.stateFile.trim();
   if (raw.maxWaitMs != null) cfg.maxWaitMs = raw.maxWaitMs;
   if (raw.timeoutMs != null) cfg.timeoutMs = raw.timeoutMs;
+  if (raw.allowedHosts != null) cfg.allowedHosts = parseHostList(raw.allowedHosts);
+  if (raw.rateLimitPerMinute != null) cfg.rateLimitPerMinute = raw.rateLimitPerMinute;
+  if (raw.maxRetries != null) cfg.maxRetries = raw.maxRetries;
+  if (raw.retryBaseMs != null) cfg.retryBaseMs = raw.retryBaseMs;
+  if (raw.dashboard && typeof raw.dashboard === 'object') {
+    if (raw.dashboard.enabled != null) cfg.dashboard.enabled = asBool(raw.dashboard.enabled, 'dashboard.enabled');
+    if (typeof raw.dashboard.host === 'string' && raw.dashboard.host.trim()) cfg.dashboard.host = raw.dashboard.host.trim();
+    if (raw.dashboard.port != null) cfg.dashboard.port = raw.dashboard.port;
+  }
   if (raw.inbox && typeof raw.inbox === 'object' && !Array.isArray(raw.inbox)) {
     applyInbox(cfg.inbox, raw.inbox);
   }
@@ -173,6 +190,8 @@ function normalizeFile(raw) {
       keyHeader: raw.keyHeader,
       keyPrefix: raw.keyPrefix,
       replyUrl: raw.replyUrl,
+      sseUrl: raw.sseUrl,
+      signingSecret: raw.signingSecret,
       timeoutMs: raw.timeoutMs,
     });
     if (!cfg.defaultBot) cfg.defaultBot = id;
@@ -186,6 +205,7 @@ function applyInbox(inbox, raw) {
   if (raw.port != null) inbox.port = raw.port;
   if (typeof raw.path === 'string' && raw.path.trim()) inbox.path = normalizeInboxPath(raw.path);
   if (typeof raw.token === 'string' && raw.token) inbox.token = raw.token;
+  if (typeof raw.signingSecret === 'string' && raw.signingSecret) inbox.signingSecret = raw.signingSecret;
   if (typeof raw.publicUrl === 'string' && raw.publicUrl.trim()) inbox.publicUrl = raw.publicUrl.trim();
 }
 
@@ -237,7 +257,19 @@ function applyEnv(cfg, env) {
   if (env.BOT_INBOX_HOST) cfg.inbox.host = env.BOT_INBOX_HOST;
   if (env.BOT_INBOX_PATH) cfg.inbox.path = normalizeInboxPath(env.BOT_INBOX_PATH);
   if (env.BOT_INBOX_TOKEN) cfg.inbox.token = env.BOT_INBOX_TOKEN;
+  if (env.BOT_INBOX_SIGNING_SECRET) cfg.inbox.signingSecret = env.BOT_INBOX_SIGNING_SECRET;
   if (env.BOT_INBOX_PUBLIC_URL) cfg.inbox.publicUrl = env.BOT_INBOX_PUBLIC_URL;
+  if (env.BOT_ALLOWED_HOSTS) cfg.allowedHosts = parseHostList(env.BOT_ALLOWED_HOSTS);
+  if (env.BOT_RATE_LIMIT_PER_MINUTE) cfg.rateLimitPerMinute = env.BOT_RATE_LIMIT_PER_MINUTE;
+  if (env.BOT_MAX_RETRIES) cfg.maxRetries = env.BOT_MAX_RETRIES;
+  if (env.BOT_RETRY_BASE_MS) cfg.retryBaseMs = env.BOT_RETRY_BASE_MS;
+  if (env.DASHBOARD_PORT) {
+    cfg.dashboard.enabled = true;
+    cfg.dashboard.port = env.DASHBOARD_PORT;
+  }
+  if (env.DASHBOARD_HOST) cfg.dashboard.host = env.DASHBOARD_HOST;
+  if (env.MCP_HTTP_TOKEN) cfg.http.token = env.MCP_HTTP_TOKEN;
+  if (env.MCP_ALLOWED_ORIGINS) cfg.http.allowedOrigins = parseHostList(env.MCP_ALLOWED_ORIGINS);
 }
 
 function envBotPatch(env) {
@@ -248,6 +280,8 @@ function envBotPatch(env) {
   if (env.BOT_KEY_HEADER) patch.keyHeader = env.BOT_KEY_HEADER;
   if (Object.prototype.hasOwnProperty.call(env, 'BOT_KEY_PREFIX')) patch.keyPrefix = env.BOT_KEY_PREFIX;
   if (env.BOT_REPLY_URL) patch.replyUrl = env.BOT_REPLY_URL;
+  if (env.BOT_REPLY_SSE_URL) patch.sseUrl = env.BOT_REPLY_SSE_URL;
+  if (env.BOT_SIGNING_SECRET) patch.signingSecret = env.BOT_SIGNING_SECRET;
   return patch;
 }
 
@@ -264,6 +298,9 @@ function finalizeBots(cfg, env) {
   const globalTimeout = requirePositiveInt(cfg.timeoutMs, 'timeoutMs', 1000, 120000);
   cfg.timeoutMs = globalTimeout;
   cfg.maxWaitMs = requirePositiveInt(cfg.maxWaitMs, 'maxWaitMs', 1000, 600000);
+  cfg.rateLimitPerMinute = requirePositiveInt(cfg.rateLimitPerMinute, 'rateLimitPerMinute', 0, 10000);
+  cfg.maxRetries = requirePositiveInt(cfg.maxRetries, 'maxRetries', 0, 5);
+  cfg.retryBaseMs = requirePositiveInt(cfg.retryBaseMs, 'retryBaseMs', 0, 10000);
   const forceTimeout = Boolean(env && env.BOT_TIMEOUT_MS);
   for (const bot of Object.values(cfg.bots)) {
     if (!bot.name) bot.name = bot.id;
@@ -289,6 +326,15 @@ function validate(cfg) {
     }
     assertHttpUrl(bot.url, `Bot "${id}" url`, secrets, { required: true });
     if (bot.replyUrl) assertHttpUrl(bot.replyUrl, `Bot "${id}" replyUrl`, secrets, { required: false });
+    if (bot.sseUrl) assertHttpUrl(bot.sseUrl, `Bot "${id}" sseUrl`, secrets, { required: false });
+    if (bot.signingSecret && /[\r\n]/.test(bot.signingSecret)) {
+      throw new ConfigError(`Bot "${id}" signingSecret must not contain newlines.`);
+    }
+    for (const field of ['url', 'replyUrl', 'sseUrl']) {
+      if (bot[field] && !hostAllowed(bot[field], cfg.allowedHosts)) {
+        throw new ConfigError(`Bot "${id}" ${field} host is not in allowedHosts.`);
+      }
+    }
     if (bot.key != null && typeof bot.key !== 'string') {
       throw new ConfigError(`Bot "${id}" key must be a string.`);
     }
@@ -311,6 +357,13 @@ function validate(cfg) {
 
   if (cfg.inbox.token && /[\r\n]/.test(cfg.inbox.token)) {
     throw new ConfigError('inbox.token must not contain newlines.');
+  }
+  if (cfg.inbox.signingSecret && /[\r\n]/.test(cfg.inbox.signingSecret)) {
+    throw new ConfigError('inbox.signingSecret must not contain newlines.');
+  }
+  if (cfg.dashboard.enabled) {
+    cfg.dashboard.port = requirePositiveInt(cfg.dashboard.port, 'dashboard.port', 0, 65535);
+    if (/[\r\n\s]/.test(cfg.dashboard.host || '')) throw new ConfigError('dashboard.host must not contain spaces.');
   }
   if (cfg.inbox.publicUrl) assertHttpUrl(cfg.inbox.publicUrl, 'inbox.publicUrl', secrets, { required: false });
   if (cfg.inbox.enabled) {
@@ -342,6 +395,8 @@ function normalizeBot(id, raw) {
     keyHeader: optionalTrimmed(raw.keyHeader),
     keyPrefix: raw.keyPrefix === undefined || raw.keyPrefix === null ? undefined : String(raw.keyPrefix),
     replyUrl: optionalTrimmed(raw.replyUrl),
+    sseUrl: optionalTrimmed(raw.sseUrl),
+    signingSecret: raw.signingSecret == null || raw.signingSecret === '' ? undefined : String(raw.signingSecret),
     timeoutMs: raw.timeoutMs == null || raw.timeoutMs === '' ? undefined : raw.timeoutMs,
   };
 }
@@ -453,7 +508,14 @@ function collectSecrets(cfg) {
     if (typeof bot.key === 'string') secrets.push(bot.key);
   }
   if (cfg.inbox && typeof cfg.inbox.token === 'string') secrets.push(cfg.inbox.token);
+  if (cfg.inbox && typeof cfg.inbox.signingSecret === 'string') secrets.push(cfg.inbox.signingSecret);
+  if (cfg.http && typeof cfg.http.token === 'string') secrets.push(cfg.http.token);
   return secrets;
+}
+
+function parseHostList(value) {
+  const items = Array.isArray(value) ? value : String(value || '').split(',');
+  return items.map((item) => String(item).trim()).filter(Boolean);
 }
 
 function clip(text, max) {

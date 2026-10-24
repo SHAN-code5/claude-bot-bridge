@@ -60,7 +60,7 @@ test('the process speaks initialize, tools/list, and tools/call over stdio', asy
     const listed = await child.request('tools/list', {}, 2);
     assert.deepEqual(
       listed.result.tools.map((tool) => tool.name),
-      ['list_bots', 'send_message', 'get_replies', 'wait_for_reply']
+      ['list_bots', 'send_message', 'get_replies', 'wait_for_reply', 'broadcast_message', 'relay_conversation', 'stop_relay']
     );
     assert.deepEqual(listed.result.tools.find((tool) => tool.name === 'send_message').inputSchema.required, [
       'message',
@@ -144,5 +144,5 @@ test('missing config, --help, and --version exit without waiting on stdin', asyn
   });
   const versionExit = await version.stop();
   assert.equal(versionExit.code, 0);
-  assert.equal(versionOut.trim(), '0.1.0');
+  assert.equal(versionOut.trim(), '0.2.0');
 });

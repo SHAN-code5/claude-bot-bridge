@@ -97,6 +97,21 @@ class ReplyStore {
     return this.items.map((item) => item.id);
   }
 
+  threads() {
+    const map = new Map();
+    for (const item of this.items) {
+      const threadId = item.threadId || 'unscoped';
+      if (!map.has(threadId)) {
+        map.set(threadId, { threadId, count: 0, lastAt: item.receivedAt, bots: new Set() });
+      }
+      const row = map.get(threadId);
+      row.count += 1;
+      row.lastAt = item.receivedAt || row.lastAt;
+      if (item.bot) row.bots.add(item.bot);
+    }
+    return [...map.values()].map((row) => ({ ...row, bots: [...row.bots] }));
+  }
+
   save() {
     if (!this.file) return;
     const dir = path.dirname(this.file);
@@ -116,6 +131,7 @@ function matches(item, filter) {
   if (filter.bot && item.bot && item.bot !== filter.bot) return false;
   if (filter.threadId && item.threadId && item.threadId !== filter.threadId) return false;
   if (filter.exclude && filter.exclude.has(item.id)) return false;
+  if (filter.excludeSources && filter.excludeSources.includes(item.source)) return false;
   if (filter.sinceMs != null) {
     const stamp = Date.parse(item.at || item.receivedAt);
     if (Number.isFinite(stamp) && stamp < filter.sinceMs) return false;

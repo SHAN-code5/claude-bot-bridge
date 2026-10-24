@@ -2,14 +2,16 @@
 
 const { parseReplyBody } = require('./parse');
 const { redact } = require('./redact');
+const { signHeaders } = require('./signing');
 
 const VERSION = require('../package.json').version;
 const MAX_HTTP_BODY = 1024 * 1024;
 
 class HttpCallError extends Error {
-  constructor(message, secrets) {
+  constructor(message, secrets, status = 0) {
     super(redact(message, secrets || []));
     this.name = 'HttpCallError';
+    this.status = status;
   }
 }
 
@@ -22,6 +24,8 @@ async function postWebhook(bot, payload, options = {}) {
   };
   if (bot.key) headers[bot.keyHeader] = `${bot.keyPrefix}${bot.key}`;
   headers['Content-Type'] = 'application/json';
+  const rawBody = JSON.stringify(payload);
+  if (bot.signingSecret) Object.assign(headers, signHeaders(bot.signingSecret, rawBody));
 
   const deadline = requestSignal(bot.timeoutMs, options.signal);
   try {
@@ -30,7 +34,7 @@ async function postWebhook(bot, payload, options = {}) {
       response = await fetchImpl(bot.url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(payload),
+        body: rawBody,
         redirect: 'manual',
         signal: deadline.signal,
       });
@@ -46,14 +50,16 @@ async function postWebhook(bot, payload, options = {}) {
     if (response.status >= 300 && response.status < 400) {
       throw new HttpCallError(
         `Webhook for "${bot.id}" returned HTTP ${response.status} redirect. The bridge does not follow redirects, so the secret is not sent to another host.`,
-        secrets
+        secrets,
+        response.status
       );
     }
     if (response.status < 200 || response.status >= 300) {
       const snippet = clip(text, 400);
       throw new HttpCallError(
         `Webhook for "${bot.id}" returned HTTP ${response.status}${snippet ? `: ${snippet}` : '.'}`,
-        secrets
+        secrets,
+        response.status
       );
     }
     return {
@@ -72,16 +78,19 @@ async function pollReplies(bot, store, options = {}) {
   const secrets = options.secrets || [];
   const deadline = requestSignal(bot.timeoutMs, options.signal);
   try {
+    const headers = {
+      Accept: 'application/json, text/plain;q=0.8, */*;q=0.1',
+      'Cache-Control': 'no-cache',
+      Pragma: 'no-cache',
+      'User-Agent': `claude-bot-bridge/${VERSION}`,
+    };
+    const etags = options.etags;
+    if (etags && etags.get(bot.id)) headers['If-None-Match'] = etags.get(bot.id);
     let response;
     try {
       response = await fetchImpl(bot.replyUrl, {
         method: 'GET',
-        headers: {
-          Accept: 'application/json, text/plain;q=0.8, */*;q=0.1',
-          'Cache-Control': 'no-cache',
-          Pragma: 'no-cache',
-          'User-Agent': `claude-bot-bridge/${VERSION}`,
-        },
+        headers,
         redirect: 'manual',
         signal: deadline.signal,
       });
@@ -92,20 +101,28 @@ async function pollReplies(bot, store, options = {}) {
         secrets
       );
     }
+    if (response.status === 304) {
+      await readBody(response, secrets, `Reply URL for "${bot.id}"`).catch(() => '');
+      return [];
+    }
     const text = await readBody(response, secrets, `Reply URL for "${bot.id}"`);
     if (response.status >= 300 && response.status < 400) {
       throw new HttpCallError(
         `Reply URL for "${bot.id}" returned HTTP ${response.status} redirect. The bridge does not follow redirects.`,
-        secrets
+        secrets,
+        response.status
       );
     }
     if (response.status < 200 || response.status >= 300) {
       const snippet = clip(text, 400);
       throw new HttpCallError(
         `Reply URL for "${bot.id}" returned HTTP ${response.status}${snippet ? `: ${snippet}` : '.'}`,
-        secrets
+        secrets,
+        response.status
       );
     }
+    const etag = headerGet(response, 'etag');
+    if (etag && etags) etags.set(bot.id, etag);
     const parsed = parseReplyBody(text, headerGet(response, 'content-type'), {
       source: 'poll',
       bot: bot.id,

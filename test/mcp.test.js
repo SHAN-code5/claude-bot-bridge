@@ -28,7 +28,11 @@ test('initialize echoes a supported version and describes the tool surface', asy
   assert.equal(response.id, 1);
   assert.equal(response.result.protocolVersion, '2024-11-05');
   assert.equal(response.result.serverInfo.name, 'claude-bot-bridge');
-  assert.deepEqual(response.result.capabilities, { tools: { listChanged: false } });
+  assert.deepEqual(response.result.capabilities, {
+    tools: { listChanged: false },
+    resources: { subscribe: false, listChanged: false },
+    logging: {},
+  });
   assert.match(response.result.instructions, /Be careful/);
   assert.match(INSTRUCTIONS, /threadId/);
   assert.match(INSTRUCTIONS, /untrusted/);
@@ -49,7 +53,7 @@ test('notifications get no response, ping accepts id 0, and unknown methods erro
   const ping = await handle({ jsonrpc: '2.0', id: 0, method: 'ping' });
   assert.equal(ping.id, 0);
   assert.deepEqual(ping.result, {});
-  const missing = await handle({ jsonrpc: '2.0', id: 'abc', method: 'resources/list' });
+  const missing = await handle({ jsonrpc: '2.0', id: 'abc', method: 'prompts/list' });
   assert.equal(missing.error.code, -32601);
   assert.equal(missing.id, 'abc');
 });

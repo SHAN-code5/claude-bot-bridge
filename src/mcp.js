@@ -4,10 +4,21 @@ const { redact } = require('./redact');
 
 // Echo a protocol version we know. Anything else gets the widely deployed
 // 2025-03-26 response, which still speaks tools/list and tools/call.
-const SUPPORTED_VERSIONS = new Set(['2024-10-07', '2024-11-05', '2025-03-26', '2025-06-18']);
+const SUPPORTED_VERSIONS = new Set(['2024-10-07', '2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
 const DEFAULT_VERSION = '2025-03-26';
 
-function createHandler({ service, serverInfo, instructions, secrets }) {
+function createHandler({ service, resources, serverInfo, instructions, secrets }) {
+  const library = resources || {
+    list() {
+      return [];
+    },
+    templates() {
+      return [];
+    },
+    read() {
+      return null;
+    },
+  };
   return async function handle(message, signal) {
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
       return rpcError(null, -32600, 'Invalid Request');
@@ -26,13 +37,35 @@ function createHandler({ service, serverInfo, instructions, secrets }) {
         const protocolVersion = SUPPORTED_VERSIONS.has(requested) ? requested : DEFAULT_VERSION;
         return rpcResult(message.id, {
           protocolVersion,
-          capabilities: { tools: { listChanged: false } },
+          capabilities: {
+            tools: { listChanged: false },
+            resources: { subscribe: false, listChanged: false },
+            logging: {},
+          },
           serverInfo,
           instructions,
         });
       }
-      if (method === 'ping' || method === 'initialized') {
+      if (method === 'ping' || method === 'initialized' || method === 'logging/setLevel') {
         return hasId ? rpcResult(message.id, {}) : null;
+      }
+      if (method === 'resources/list') {
+        if (!hasId) return null;
+        return rpcResult(message.id, { resources: library.list() });
+      }
+      if (method === 'resources/templates/list') {
+        if (!hasId) return null;
+        return rpcResult(message.id, { resourceTemplates: library.templates() });
+      }
+      if (method === 'resources/read') {
+        if (!hasId) return null;
+        const uri = message.params && message.params.uri;
+        if (typeof uri !== 'string' || !uri) return rpcError(message.id, -32602, 'Invalid params: uri is required');
+        const found = library.read(uri);
+        if (!found) return rpcError(message.id, -32002, `Resource not found: ${uri}`);
+        return rpcResult(message.id, {
+          contents: [{ uri: found.uri, mimeType: found.mimeType, text: found.text }],
+        });
       }
       if (method === 'tools/list') {
         if (!hasId) return null;

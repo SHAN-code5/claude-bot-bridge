@@ -56,6 +56,10 @@ Prefer a local HTTP server on `127.0.0.1` and port `0` over mocking `fetch`, so 
 - Do not commit real webhook keys, inbox tokens, or a filled-in `claude-bot-bridge.config.json`. The example file uses `${ENV}` placeholders on purpose.
 - Say how you ran `npm test` and, if you changed the protocol or the tools, how you checked `initialize`, `tools/list`, and `tools/call`.
 
+## Versions
+
+Versions follow semver. Record user-visible changes in `CHANGELOG.md`. Tag releases `vX.Y.Z`. The release workflow runs the tests, packs `claude-bot-bridge.mcpb`, and publishes to npm when `NPM_TOKEN` is set.
+
 ## Publishing
 
 The npm package name is `claude-bot-bridge` and the bin is `claude-bot-bridge`. After a maintainer publishes it, `npx -y claude-bot-bridge` works. Until then, `npx -y github:SHAN-code5/claude-bot-bridge` and `node bin/claude-bot-bridge.js` are the install paths.

@@ -3,16 +3,19 @@
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { parseReplyBody } = require('./parse');
+const { verifySignature } = require('./signing');
 
 const MAX_BODY = 256 * 1024;
 
-function startInbox({ config, store, log }) {
+function startInbox({ config, store, log, onReply }) {
   const inbox = config.inbox;
   const server = http.createServer((req, res) => {
     handle(req, res, {
       replyPath: inbox.path,
       token: inbox.token,
+      signingSecret: inbox.signingSecret,
       store,
+      onReply,
       log: log || { info() {}, error() {} },
     }).catch((err) => {
       if (err && err.status === 413) return;
@@ -89,6 +92,19 @@ async function handle(req, res, ctx) {
   }
 
   const raw = await readBody(req, res);
+  if (ctx.signingSecret) {
+    const ok = verifySignature(
+      ctx.signingSecret,
+      raw,
+      req.headers['x-bridge-timestamp'],
+      req.headers['x-bridge-signature']
+    );
+    if (!ok) {
+      ctx.log.info('inbox rejected a bad signature');
+      sendJson(res, 401, { ok: false, error: 'Bad signature' });
+      return;
+    }
+  }
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -107,7 +123,10 @@ async function handle(req, res, ctx) {
   const stored = [];
   for (const reply of replies) {
     const saved = ctx.store.add(reply);
-    if (saved) stored.push(saved);
+    if (saved) {
+      stored.push(saved);
+      if (ctx.onReply) ctx.onReply(saved);
+    }
   }
   if (stored.length === 0) {
     sendJson(res, 200, { ok: true, duplicate: true });

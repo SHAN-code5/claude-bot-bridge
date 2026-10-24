@@ -2,8 +2,9 @@
 
 const crypto = require('node:crypto');
 const { parseReplyBody } = require('./parse');
-const { postWebhook, pollReplies, HttpCallError } = require('./webhook');
+const { pollReplies, HttpCallError } = require('./webhook');
 const { redact } = require('./redact');
+const { RateLimiter, sendWithPolicy } = require('./policy');
 
 const THREAD_ID_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const MAX_TEXT = 100_000;
@@ -22,6 +23,15 @@ function createService(options) {
   const secrets = options.secrets || config.secrets || [];
   const log = options.log || { info() {}, error() {} };
   const sleep = options.sleep || defaultSleep;
+  const runtime = options.runtime || {
+    shouldStop() {
+      return false;
+    },
+    emit() {},
+    clearRelayStop() {},
+  };
+  const rate = options.rateLimiter || new RateLimiter(config.rateLimitPerMinute || 0);
+  const etags = options.etags || new Map();
 
   const definitions = toolDefinitions(config);
 
@@ -33,13 +43,17 @@ function createService(options) {
       if (name === 'list_bots') text = listBots();
       else if (name === 'send_message') text = await sendMessage(input, signal);
       else if (name === 'get_replies') text = await getReplies(input, signal);
-      else if (name === 'wait_for_reply') text = await waitForReply(input, signal);
+      else       if (name === 'wait_for_reply') text = await waitForReply(input, signal);
+      else if (name === 'broadcast_message') text = await broadcastMessage(input, signal);
+      else if (name === 'relay_conversation') text = await relayConversation(input, signal);
+      else if (name === 'stop_relay') text = stopRelay();
       else {
         return fail(`Unknown tool "${name}". Tools: ${definitions.map((tool) => tool.name).join(', ')}.`);
       }
       return ok(text);
     } catch (err) {
       if (err && err.name === 'Cancelled') throw err;
+      if (err && err.code === 'RATE_LIMIT') return fail(err.message);
       const message = err && err.message ? err.message : 'Unexpected error';
       log.error(`${name} failed: ${message}`);
       if (err instanceof ToolError || err instanceof HttpCallError) return fail(message);
@@ -62,6 +76,8 @@ function createService(options) {
       lines.push(`  webhook: ${bot.url}`);
       lines.push(`  auth: ${bot.key ? `header ${bot.keyHeader} is set` : 'none'}`);
       lines.push(`  reply poll: ${bot.replyUrl || 'not configured'}`);
+      lines.push(`  reply sse: ${bot.sseUrl || 'not configured'}`);
+      lines.push(`  signing: ${bot.signingSecret ? 'yes' : 'no'}`);
     }
     lines.push('');
     if (config.inbox && config.inbox.enabled) {
@@ -98,7 +114,17 @@ function createService(options) {
       replyChannels: buildReplyChannels(config, bot, threadId),
     };
     throwIfCancelled(signal);
-    const response = await postWebhook(bot, payload, { fetchImpl, secrets, signal });
+    const response = await sendWithPolicy({ bot, payload, fetchImpl, secrets, signal, rate, config });
+    store.add({
+      id: `sent:${messageId}`,
+      bot: bot.id,
+      threadId,
+      messageId,
+      text: message,
+      source: 'sent',
+      at: payload.sentAt,
+      delivered: true,
+    });
     const parsed = parseReplyBody(response.text, response.contentType, {
       source: 'sync',
       bot: bot.id,
@@ -108,7 +134,9 @@ function createService(options) {
     const shown = [];
     for (const reply of parsed) {
       const saved = store.add({ ...reply, delivered: true });
-      shown.push(saved || reply);
+      const visible = saved || reply;
+      shown.push(visible);
+      if (saved) runtime.emit(saved);
     }
     log.info(`sent bot=${bot.id} status=${response.status} thread=${threadId}`);
     return formatSend({ bot, threadId, messageId, status: response.status, replies: shown });
@@ -126,6 +154,7 @@ function createService(options) {
       bot: bot ? bot.id : null,
       threadId,
       sinceMs,
+      excludeSources: ['sent'],
     });
     const slice = matched.slice(-limit);
     return formatReplies({
@@ -188,6 +217,7 @@ function createService(options) {
     const deadline = started + timeoutMs;
     let nextPollAt = Date.now() + interval;
     while (Date.now() < deadline) {
+      if (runtime.shouldStop()) return 'Stopped before a reply arrived.';
       throwIfCancelled(signal);
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
@@ -207,11 +237,90 @@ function createService(options) {
     return timeoutText({ timeoutMs, threadId, bot, pollErrors });
   }
 
+  async function broadcastMessage(args, signal) {
+    const ids = botIds(args.bots);
+    if (ids.length === 0) throw new ToolError('No bots to broadcast to.');
+    const threadId = args.threadId ? requireId(args.threadId, 'threadId') : newId('thr');
+    const parts = [`Broadcast to ${ids.join(', ')} on thread ${threadId}.`];
+    for (const id of ids) {
+      parts.push('');
+      parts.push(await sendMessage({ ...args, bot: id, threadId }, signal));
+    }
+    return parts.join('\n');
+  }
+
+  async function relayConversation(args, signal) {
+    const from = resolveBot(config, args.fromBot);
+    const to = resolveBot(config, args.toBot);
+    if (from.id === to.id) throw new ToolError('fromBot and toBot must be different bots.');
+    const opening = requireText(args.message, 'message');
+    const maxTurns = clampInt(args.maxTurns == null ? 4 : args.maxTurns, 4, 1, 20, 'maxTurns');
+    const relayWait = clampInt(args.timeoutMs == null ? 20000 : args.timeoutMs, 20000, 0, config.maxWaitMs, 'timeoutMs');
+    const threadId = args.threadId ? requireId(args.threadId, 'threadId') : newId('thr');
+    runtime.clearRelayStop();
+    let current = opening;
+    let speaker = from;
+    const lines = [`Relay ${from.id} <-> ${to.id} on ${threadId}. Max turns: ${maxTurns}.`];
+    for (let turn = 1; turn <= maxTurns; turn += 1) {
+      if (runtime.shouldStop()) {
+        lines.push('Stopped by stop_relay.');
+        break;
+      }
+      const known = new Set(store.ids());
+      await sendMessage({ message: current, bot: speaker.id, threadId, context: `relay turn ${turn}` }, signal);
+      let reply = newestReply(known, threadId);
+      if (!reply) {
+        const waited = await waitForReply(
+          { bot: speaker.id, threadId, timeoutMs: relayWait, pollIntervalMs: 500 },
+          signal
+        );
+        if (runtime.shouldStop() || waited.startsWith('Stopped')) {
+          lines.push('Stopped by stop_relay.');
+          break;
+        }
+        reply = newestReply(known, threadId);
+        if (!reply) {
+          lines.push(`Turn ${turn}: ${speaker.id} did not reply.`);
+          lines.push(waited);
+          break;
+        }
+      }
+      lines.push('');
+      lines.push(`Turn ${turn} ${speaker.id}:`);
+      lines.push(reply.text);
+      current = reply.text;
+      speaker = speaker.id === from.id ? to : from;
+    }
+    runtime.clearRelayStop();
+    lines.push('');
+    lines.push('Relay finished. Read the full transcript with bridge://thread/' + threadId);
+    return lines.join('\n');
+  }
+
+  function stopRelay() {
+    runtime.requestStopRelay();
+    return 'Stop requested. The running relay finishes the current turn, then stops.';
+  }
+
+  function newestReply(known, threadId) {
+    const fresh = store
+      .list({ threadId, excludeSources: ['sent'] })
+      .filter((item) => !known.has(item.id));
+    return fresh.length ? fresh[fresh.length - 1] : null;
+  }
+
+  function botIds(value) {
+    if (value == null || value === '') return Object.keys(config.bots);
+    const list = Array.isArray(value) ? value : String(value).split(',');
+    return list.map((item) => item.trim()).filter(Boolean);
+  }
+
   async function pollBots(bots, pollErrors, signal) {
     for (const item of bots) {
       throwIfCancelled(signal);
       try {
-        await pollReplies(item, store, { fetchImpl, secrets, signal });
+        const added = await pollReplies(item, store, { fetchImpl, secrets, signal, etags });
+        for (const reply of added) runtime.emit(reply);
       } catch (err) {
         if (err && err.name === 'Cancelled') throw err;
         if (signal && signal.aborted) throwIfCancelled(signal);
@@ -306,6 +415,49 @@ function toolDefinitions(config) {
         },
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    {
+      name: 'broadcast_message',
+      title: 'Broadcast message',
+      description:
+        'Send the same message to several configured bots. Omit bots to send to every bot. One threadId is shared so the transcript stays together.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message: { type: 'string' },
+          bots: { type: 'array', items: { type: 'string' }, description: 'Bot ids. Omit for every bot.' },
+          threadId: { type: 'string' },
+          context: { type: 'string' },
+        },
+        required: ['message'],
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    {
+      name: 'relay_conversation',
+      title: 'Relay two bots',
+      description:
+        'Run a multi-turn conversation between two configured bots. fromBot receives the opening message, then each reply is sent to the other bot. Stops at maxTurns (default 4, max 20) or when stop_relay is requested. The human can stop it between turns.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          fromBot: { type: 'string' },
+          toBot: { type: 'string' },
+          message: { type: 'string', description: 'Opening message delivered to fromBot.' },
+          maxTurns: { type: 'integer', description: 'How many bot replies to collect. Default 4. Maximum 20.' },
+          timeoutMs: { type: 'integer', description: 'How long to wait for each reply. Default 20000.' },
+          threadId: { type: 'string' },
+        },
+        required: ['fromBot', 'toBot', 'message'],
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    {
+      name: 'stop_relay',
+      title: 'Stop relay',
+      description: 'Ask a running relay_conversation to stop after the current turn.',
+      inputSchema: { type: 'object', properties: {} },
+      annotations: { readOnlyHint: false, idempotentHint: true },
     },
   ];
 }

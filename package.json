@@ -1,6 +1,6 @@
 {
   "name": "claude-bot-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server that lets Claude Desktop and other clients talk to external AI bots over HTTP webhooks, and read the replies back.",
   "license": "MIT",
   "author": "SHAN-code5",
@@ -13,7 +13,11 @@
     "bin/",
     "src/",
     "examples/",
+    "mcpb/",
+    "docs/",
     "README.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
