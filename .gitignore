@@ -1,0 +1,7 @@
+node_modules/
+npm-debug.log*
+.DS_Store
+claude-bot-bridge.config.json
+*.local.json
+.claude-bot-bridge/
+coverage/

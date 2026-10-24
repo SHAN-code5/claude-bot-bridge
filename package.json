@@ -1,0 +1,42 @@
+{
+  "name": "claude-bot-bridge",
+  "version": "0.1.0",
+  "description": "MCP server that lets Claude Desktop and other clients talk to external AI bots over HTTP webhooks, and read the replies back.",
+  "license": "MIT",
+  "author": "SHAN-code5",
+  "type": "commonjs",
+  "bin": {
+    "claude-bot-bridge": "./bin/claude-bot-bridge.js"
+  },
+  "main": "./src/index.js",
+  "files": [
+    "bin/",
+    "src/",
+    "examples/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node ./bin/claude-bot-bridge.js",
+    "test": "node --test --test-reporter=spec test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SHAN-code5/claude-bot-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SHAN-code5/claude-bot-bridge/issues"
+  },
+  "homepage": "https://github.com/SHAN-code5/claude-bot-bridge#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "webhook",
+    "bot",
+    "stdio"
+  ]
+}
