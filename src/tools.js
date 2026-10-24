@@ -27,6 +27,11 @@ function createService(options) {
     shouldStop() {
       return false;
     },
+    isRelayActive() {
+      return false;
+    },
+    beginRelay() {},
+    endRelay() {},
     emit() {},
     clearRelayStop() {},
   };
@@ -73,10 +78,10 @@ function createService(options) {
     const lines = [`Default bot: ${config.defaultBot}`, `From: ${config.from}`, ''];
     for (const bot of Object.values(config.bots)) {
       lines.push(`${bot.id} — ${bot.name}`);
-      lines.push(`  webhook: ${bot.url}`);
+      lines.push(`  webhook: ${displayUrl(bot.url)}`);
       lines.push(`  auth: ${bot.key ? `header ${bot.keyHeader} is set` : 'none'}`);
-      lines.push(`  reply poll: ${bot.replyUrl || 'not configured'}`);
-      lines.push(`  reply sse: ${bot.sseUrl || 'not configured'}`);
+      lines.push(`  reply poll: ${displayUrl(bot.replyUrl)}`);
+      lines.push(`  reply sse: ${displayUrl(bot.sseUrl)}`);
       lines.push(`  signing: ${bot.signingSecret ? 'yes' : 'no'}`);
     }
     lines.push('');
@@ -244,7 +249,12 @@ function createService(options) {
     const parts = [`Broadcast to ${ids.join(', ')} on thread ${threadId}.`];
     for (const id of ids) {
       parts.push('');
-      parts.push(await sendMessage({ ...args, bot: id, threadId }, signal));
+      try {
+        parts.push(await sendMessage({ ...args, bot: id, threadId }, signal));
+      } catch (err) {
+        if (err && err.name === 'Cancelled') throw err;
+        parts.push(`${id} failed: ${err && err.message ? err.message : 'request failed'}`);
+      }
     }
     return parts.join('\n');
   }
@@ -257,10 +267,11 @@ function createService(options) {
     const maxTurns = clampInt(args.maxTurns == null ? 4 : args.maxTurns, 4, 1, 20, 'maxTurns');
     const relayWait = clampInt(args.timeoutMs == null ? 20000 : args.timeoutMs, 20000, 0, config.maxWaitMs, 'timeoutMs');
     const threadId = args.threadId ? requireId(args.threadId, 'threadId') : newId('thr');
-    runtime.clearRelayStop();
+    runtime.beginRelay();
     let current = opening;
     let speaker = from;
     const lines = [`Relay ${from.id} <-> ${to.id} on ${threadId}. Max turns: ${maxTurns}.`];
+    try {
     for (let turn = 1; turn <= maxTurns; turn += 1) {
       if (runtime.shouldStop()) {
         lines.push('Stopped by stop_relay.');
@@ -291,7 +302,9 @@ function createService(options) {
       current = reply.text;
       speaker = speaker.id === from.id ? to : from;
     }
-    runtime.clearRelayStop();
+    } finally {
+      runtime.endRelay();
+    }
     lines.push('');
     lines.push('Relay finished. Read the full transcript with bridge://thread/' + threadId);
     return lines.join('\n');
@@ -560,6 +573,20 @@ function clampInt(value, fallback, min, max, label) {
     throw new ToolError(`${label} must be from ${min} to ${max}.`);
   }
   return value;
+}
+
+function displayUrl(value) {
+  if (!value) return 'not configured';
+  try {
+    const url = new URL(value);
+    url.username = '';
+    url.password = '';
+    url.hash = '';
+    for (const key of [...url.searchParams.keys()]) url.searchParams.set(key, '…');
+    return url.toString();
+  } catch {
+    return 'invalid';
+  }
 }
 
 function newId(prefix) {

@@ -216,8 +216,25 @@ function describeFetchError(err, timeoutMs) {
   }
   const cause = err.cause && err.cause.message ? String(err.cause.message) : '';
   const message = err.message || 'request failed';
-  if (cause && !message.includes(cause)) return `${message}: ${cause}`;
-  return message;
+  const combined = cause && !message.includes(cause) ? `${message}: ${cause}` : message;
+  return scrubUrls(combined);
+}
+
+function scrubUrls(text) {
+  return String(text).replace(/https?:\/\/[^\s'"]+/g, (match) => {
+    const trimmed = match.replace(/[),.;]+$/, '');
+    const suffix = match.slice(trimmed.length);
+    try {
+      const url = new URL(trimmed);
+      url.username = '';
+      url.password = '';
+      url.search = '';
+      url.hash = '';
+      return url.toString() + suffix;
+    } catch {
+      return match;
+    }
+  });
 }
 
 function headerGet(response, name) {

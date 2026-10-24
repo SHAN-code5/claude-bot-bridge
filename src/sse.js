@@ -1,6 +1,7 @@
 'use strict';
 
 const { parseReplyBody } = require('./parse');
+const { signHeaders } = require('./signing');
 
 function startSseClients({ config, store, log, fetchImpl, onReply, signal }) {
   const stops = [];
@@ -42,6 +43,10 @@ async function readLoop(bot, signal, options) {
       delay = 500;
     } catch (err) {
       if (signal.aborted || (err && err.name === 'AbortError')) return;
+      if (err && (err.code === 'SSE_AUTH' || err.code === 'SSE_REDIRECT')) {
+        if (options.log) options.log.error(`sse ${bot.id} stopped: ${err.message}`);
+        return;
+      }
       if (options.log) options.log.error(`sse ${bot.id} disconnected: ${err.message || err}`);
       await wait(delay, signal);
       delay = Math.min(delay * 2, 15000);
@@ -52,7 +57,13 @@ async function readLoop(bot, signal, options) {
 async function readOnce(bot, signal, options) {
   const headers = { Accept: 'text/event-stream', 'Cache-Control': 'no-cache' };
   if (bot.key) headers[bot.keyHeader] = `${bot.keyPrefix}${bot.key}`;
+  if (bot.signingSecret) Object.assign(headers, signHeaders(bot.signingSecret, ''));
   const response = await options.fetchImpl(bot.sseUrl, { method: 'GET', headers, redirect: 'manual', signal });
+  if (response.status === 401 || response.status === 403 || (response.status >= 300 && response.status < 400)) {
+    const error = new Error(`HTTP ${response.status}`);
+    error.code = response.status < 400 ? 'SSE_REDIRECT' : 'SSE_AUTH';
+    throw error;
+  }
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -66,6 +77,11 @@ async function readOnce(bot, signal, options) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
+    if (buffer.length > 1024 * 1024) {
+      buffer = '';
+      if (options.log) options.log.error(`sse ${bot.id} dropped an oversized event`);
+      continue;
+    }
     buffer = consumeEvents(buffer, (event) => {
       const replies = parseReplyBody(event.data, 'application/json', { source: 'sse', bot: bot.id });
       for (const reply of replies) {

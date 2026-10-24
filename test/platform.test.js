@@ -15,7 +15,8 @@ const { startDashboard } = require('../src/dashboard');
 const { startHttpTransport } = require('../src/http-transport');
 const { createApp } = require('../src/app');
 const { signHeaders, verifySignature } = require('../src/signing');
-const { initCommand, doctorCommand, packCommand, startTunnel, claudeConfigPath } = require('../src/commands');
+const { initCommand, doctorCommand, packCommand, startTunnel, claudeConfigPath, launchSpec } = require('../src/commands');
+const { originAllowed } = require('../src/http-transport');
 const { startInbox } = require('../src/inbox');
 const { listen, readBody, json, tempDir, load, spawnBridge } = require('./helpers');
 
@@ -137,6 +138,110 @@ test('signs webhook bodies, retries 503, and enforces the rate limit', async () 
   }
 });
 
+test('blank Desktop Extension placeholders are not treated as secrets or URLs', () => {
+  const config = loadConfig({
+    env: {
+      BOT_WEBHOOK_URL: 'https://example.com/hook',
+      BOT_WEBHOOK_KEY: '${user_config.webhook_key}',
+      BOT_REPLY_URL: '${user_config.reply_url}',
+      BOT_REPLY_SSE_URL: '${user_config.reply_sse_url}',
+      BOT_SIGNING_SECRET: '${user_config.signing_secret}',
+    },
+    cwd: tempDir(),
+  });
+  assert.equal(config.bots.default.key, undefined);
+  assert.equal(config.bots.default.replyUrl, undefined);
+  assert.equal(config.bots.default.sseUrl, undefined);
+  assert.equal(config.bots.default.signingSecret, undefined);
+});
+
+test('init keeps the config private and uses npx when the install path is a cache', () => {
+  const home = tempDir();
+  const result = initCommand({
+    argv: ['--url', 'https://example.com/hook', '--key', 'super-secret-value'],
+    platform: 'linux',
+    homedir: home,
+    env: {},
+  });
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
+  }
+  assert.deepEqual(launchSpec('/tmp/node_modules/claude-bot-bridge/bin/claude-bot-bridge.js'), {
+    command: 'npx',
+    args: ['-y', 'claude-bot-bridge'],
+  });
+  assert.equal(launchSpec('/opt/claude-bot-bridge/bin/claude-bot-bridge.js').command, 'node');
+  assert.equal(originAllowed('https://claude.ai', ['claude.ai']), true);
+  assert.equal(originAllowed('https://evil.example', ['claude.ai']), false);
+});
+
+test('stop_relay does not cancel a later wait', async () => {
+  const config = load({ BOT_WEBHOOK_URL: 'https://example.com/hook' });
+  const runtime = createRuntime();
+  const { service } = serviceFor(config, { runtime });
+  const stopped = await service.call('stop_relay', {});
+  assert.match(stopped.content[0].text, /Stop requested/);
+  const waited = await service.call('wait_for_reply', { timeoutMs: 0 });
+  assert.equal(waited.content[0].text.includes('Stopped'), false);
+  assert.match(waited.content[0].text, /no reply URL or inbox/i);
+});
+
+test('list_bots hides query secrets', async () => {
+  const config = load({
+    BOT_WEBHOOK_URL: 'https://example.com/hook?token=super-secret-value',
+    BOT_WEBHOOK_KEY: 'other-secret-value',
+  });
+  const { service } = serviceFor(config);
+  const listed = await service.call('list_bots', {});
+  assert.equal(listed.content[0].text.includes('super-secret-value'), false);
+  assert.match(listed.content[0].text, /example.com/);
+});
+
+test('init rejects a non-http webhook URL', () => {
+  assert.throws(
+    () => initCommand({ argv: ['--url', 'ftp://example.com/hook'], platform: 'linux', homedir: tempDir(), env: {} }),
+    /http or https/
+  );
+});
+
+test('SSE auth failures are not retried', async () => {
+  let hits = 0;
+  const clients = startSseClients({
+    config: {
+      bots: {
+        assistant: {
+          id: 'assistant',
+          sseUrl: 'http://127.0.0.1/events',
+          key: 'k',
+          keyHeader: 'Authorization',
+          keyPrefix: 'Bearer ',
+        },
+      },
+    },
+    store: new ReplyStore(),
+    log: { info() {}, error() {} },
+    fetchImpl: async () => {
+      hits += 1;
+      return { status: 401, body: null };
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await clients.close();
+  assert.equal(hits, 1);
+});
+
+test('reply notifications wait until initialize', () => {
+  const { createNotifyBuffer } = require('../src/runtime');
+  const sent = [];
+  const buffer = createNotifyBuffer((message) => sent.push(message));
+  buffer.send({ method: 'notifications/message' });
+  assert.equal(sent.length, 0);
+  buffer.markReady();
+  assert.equal(sent.length, 1);
+  buffer.send({ method: 'notifications/message', params: { data: 'later' } });
+  assert.equal(sent.length, 2);
+});
+
 test('allowlist rejects a host that was not named', () => {
   assert.throws(
     () =>
@@ -236,8 +341,12 @@ test('broadcast and relay move messages between two bots until stopped', async (
     });
     const runtime = createRuntime();
     const { service } = serviceFor(config, { runtime });
-    const broadcast = await service.call('broadcast_message', { message: 'hi all', bots: ['left', 'right'] });
+    const broadcast = await service.call('broadcast_message', {
+      message: 'hi all',
+      bots: ['left', 'missing', 'right'],
+    });
     assert.match(broadcast.content[0].text, /echo hi all/);
+    assert.match(broadcast.content[0].text, /missing failed/);
     assert.equal((broadcast.content[0].text.match(/echo hi all/g) || []).length, 2);
 
     const relayRuntime = createRuntime();

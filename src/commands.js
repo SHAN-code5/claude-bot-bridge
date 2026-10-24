@@ -26,7 +26,14 @@ function serverEntry() {
   return path.resolve(__dirname, '..', 'bin', 'claude-bot-bridge.js');
 }
 
-function buildDesktopEntry({ url, key, name, replyUrl, sseUrl, from }) {
+function launchSpec(entry) {
+  if (/[\\/](?:node_modules|_npx)[\\/]/.test(entry) || /[\\/]\.npm[\\/]/.test(entry)) {
+    return { command: 'npx', args: ['-y', pkg.name] };
+  }
+  return { command: 'node', args: [entry] };
+}
+
+function buildDesktopEntry({ url, key, name, replyUrl, sseUrl, from, entry }) {
   const env = {
     BOT_WEBHOOK_URL: url,
     BOT_NAME: name || 'Assistant',
@@ -35,11 +42,8 @@ function buildDesktopEntry({ url, key, name, replyUrl, sseUrl, from }) {
   if (key) env.BOT_WEBHOOK_KEY = key;
   if (replyUrl) env.BOT_REPLY_URL = replyUrl;
   if (sseUrl) env.BOT_REPLY_SSE_URL = sseUrl;
-  return {
-    command: 'node',
-    args: [serverEntry()],
-    env,
-  };
+  const launch = launchSpec(entry || serverEntry());
+  return { ...launch, env };
 }
 
 function initCommand(options) {
@@ -52,6 +56,18 @@ function initCommand(options) {
   const url = flags.url || env.BOT_WEBHOOK_URL;
   if (!url) {
     throw new Error('Pass --url <webhook>. Example: claude-bot-bridge init --url https://example.com/webhook --key secret');
+  }
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    throw new Error('Webhook URL is not valid. Use an http or https URL.');
+  }
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error('Webhook URL must use http or https.');
+  }
+  if (parsedUrl.username || parsedUrl.password) {
+    throw new Error('Put the secret in --key or BOT_WEBHOOK_KEY, not in the URL.');
   }
   const entry = buildDesktopEntry({
     url,
@@ -83,7 +99,12 @@ function initCommand(options) {
     return { path: target, config: current, wrote: false };
   }
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(target, `${JSON.stringify(current, null, 2)}\n`);
+  try {
+    fs.chmodSync(target, 0o600);
+  } catch {
+    // Windows may refuse the mode. The file is still written.
+  }
   return { path: target, config: current, wrote: true };
 }
 
@@ -261,6 +282,7 @@ function visit(absolute, relative, found) {
 
 module.exports = {
   claudeConfigPath,
+  launchSpec,
   buildDesktopEntry,
   initCommand,
   doctorCommand,

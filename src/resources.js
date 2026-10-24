@@ -79,9 +79,12 @@ function formatThreads(store) {
 function formatThread(store, threadId) {
   const visible = store.list().filter((item) => (item.threadId || 'unscoped') === threadId);
   if (visible.length === 0) return `No messages for thread ${threadId}.`;
-  return visible
+  let text = visible
     .map((item) => `[${item.source}] ${item.at || item.receivedAt} bot=${item.bot || '-'}\n${item.text}`)
     .join('\n\n');
+  const max = 100_000;
+  if (text.length > max) text = `${text.slice(0, max)}\n… truncated`;
+  return text;
 }
 
 function safeHost(value) {

@@ -2,8 +2,20 @@
 
 function createRuntime() {
   let relayStop = false;
+  let relayActive = false;
   const listeners = new Set();
   return {
+    beginRelay() {
+      relayActive = true;
+      relayStop = false;
+    },
+    endRelay() {
+      relayActive = false;
+      relayStop = false;
+    },
+    isRelayActive() {
+      return relayActive;
+    },
     requestStopRelay() {
       relayStop = true;
     },
@@ -11,7 +23,7 @@ function createRuntime() {
       relayStop = false;
     },
     shouldStop() {
-      return relayStop;
+      return relayActive && relayStop;
     },
     subscribe(listener) {
       listeners.add(listener);
@@ -42,4 +54,24 @@ function notificationFor(reply) {
   };
 }
 
-module.exports = { createRuntime, notificationFor };
+function createNotifyBuffer(write, limit = 50) {
+  let ready = false;
+  const pending = [];
+  return {
+    markReady() {
+      if (ready) return;
+      ready = true;
+      while (pending.length) write(pending.shift());
+    },
+    send(message) {
+      if (!ready) {
+        pending.push(message);
+        if (pending.length > limit) pending.shift();
+        return;
+      }
+      write(message);
+    },
+  };
+}
+
+module.exports = { createRuntime, notificationFor, createNotifyBuffer };
