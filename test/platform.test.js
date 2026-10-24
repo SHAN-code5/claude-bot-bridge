@@ -15,7 +15,8 @@ const { startDashboard } = require('../src/dashboard');
 const { startHttpTransport } = require('../src/http-transport');
 const { createApp } = require('../src/app');
 const { signHeaders, verifySignature } = require('../src/signing');
-const { initCommand, doctorCommand, packCommand, startTunnel, claudeConfigPath } = require('../src/commands');
+const { initCommand, doctorCommand, packCommand, startTunnel, claudeConfigPath, launchSpec } = require('../src/commands');
+const { originAllowed } = require('../src/http-transport');
 const { startInbox } = require('../src/inbox');
 const { listen, readBody, json, tempDir, load, spawnBridge } = require('./helpers');
 
@@ -152,6 +153,48 @@ test('blank Desktop Extension placeholders are not treated as secrets or URLs', 
   assert.equal(config.bots.default.replyUrl, undefined);
   assert.equal(config.bots.default.sseUrl, undefined);
   assert.equal(config.bots.default.signingSecret, undefined);
+});
+
+test('init keeps the config private and uses npx when the install path is a cache', () => {
+  const home = tempDir();
+  const result = initCommand({
+    argv: ['--url', 'https://example.com/hook', '--key', 'super-secret-value'],
+    platform: 'linux',
+    homedir: home,
+    env: {},
+  });
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(result.path).mode & 0o777, 0o600);
+  }
+  assert.deepEqual(launchSpec('/tmp/node_modules/claude-bot-bridge/bin/claude-bot-bridge.js'), {
+    command: 'npx',
+    args: ['-y', 'claude-bot-bridge'],
+  });
+  assert.equal(launchSpec('/opt/claude-bot-bridge/bin/claude-bot-bridge.js').command, 'node');
+  assert.equal(originAllowed('https://claude.ai', ['claude.ai']), true);
+  assert.equal(originAllowed('https://evil.example', ['claude.ai']), false);
+});
+
+test('stop_relay does not cancel a later wait', async () => {
+  const config = load({ BOT_WEBHOOK_URL: 'https://example.com/hook' });
+  const runtime = createRuntime();
+  const { service } = serviceFor(config, { runtime });
+  const stopped = await service.call('stop_relay', {});
+  assert.match(stopped.content[0].text, /Stop requested/);
+  const waited = await service.call('wait_for_reply', { timeoutMs: 0 });
+  assert.equal(waited.content[0].text.includes('Stopped'), false);
+  assert.match(waited.content[0].text, /no reply URL or inbox/i);
+});
+
+test('list_bots hides query secrets', async () => {
+  const config = load({
+    BOT_WEBHOOK_URL: 'https://example.com/hook?token=super-secret-value',
+    BOT_WEBHOOK_KEY: 'other-secret-value',
+  });
+  const { service } = serviceFor(config);
+  const listed = await service.call('list_bots', {});
+  assert.equal(listed.content[0].text.includes('super-secret-value'), false);
+  assert.match(listed.content[0].text, /example.com/);
 });
 
 test('init rejects a non-http webhook URL', () => {

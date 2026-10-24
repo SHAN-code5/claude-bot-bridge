@@ -2,8 +2,20 @@
 
 function createRuntime() {
   let relayStop = false;
+  let relayActive = false;
   const listeners = new Set();
   return {
+    beginRelay() {
+      relayActive = true;
+      relayStop = false;
+    },
+    endRelay() {
+      relayActive = false;
+      relayStop = false;
+    },
+    isRelayActive() {
+      return relayActive;
+    },
     requestStopRelay() {
       relayStop = true;
     },
@@ -11,7 +23,7 @@ function createRuntime() {
       relayStop = false;
     },
     shouldStop() {
-      return relayStop;
+      return relayActive && relayStop;
     },
     subscribe(listener) {
       listeners.add(listener);

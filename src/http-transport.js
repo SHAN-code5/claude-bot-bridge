@@ -178,10 +178,12 @@ function createSession(sessions, maxSessions) {
 
 function originAllowed(origin, allowedOrigins) {
   if (!origin) return true;
-  if (allowedOrigins && allowedOrigins.includes(origin)) return true;
+  const list = allowedOrigins || [];
+  if (list.includes(origin)) return true;
   try {
     const url = new URL(origin);
     if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1') return true;
+    if (list.includes(url.host) || list.includes(url.hostname)) return true;
   } catch {
     return false;
   }
@@ -200,17 +202,26 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let settled = false;
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
     req.on('data', (chunk) => {
+      if (settled) return;
       size += chunk.length;
       if (size > 1024 * 1024) {
-        reject(Object.assign(new Error('payload too large'), { status: 413 }));
+        const error = new Error('payload too large');
+        error.status = 413;
+        finish(() => reject(error));
         req.destroy();
         return;
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', () => finish(() => resolve(Buffer.concat(chunks).toString('utf8'))));
+    req.on('error', (err) => finish(() => reject(err)));
   });
 }
 

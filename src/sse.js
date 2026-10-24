@@ -77,6 +77,11 @@ async function readOnce(bot, signal, options) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
+    if (buffer.length > 1024 * 1024) {
+      buffer = '';
+      if (options.log) options.log.error(`sse ${bot.id} dropped an oversized event`);
+      continue;
+    }
     buffer = consumeEvents(buffer, (event) => {
       const replies = parseReplyBody(event.data, 'application/json', { source: 'sse', bot: bot.id });
       for (const reply of replies) {
