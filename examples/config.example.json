@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy this file aside and pass it with --config, or set the same fields with environment variables. Do not commit real keys. A placeholder that is the entire value is omitted when that variable is empty, so replyUrl and the inbox token are optional.",
+  "from": "Claude Desktop",
+  "defaultBot": "assistant",
+  "maxWaitMs": 180000,
+  "timeoutMs": 30000,
+  "inbox": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8787,
+    "path": "/reply",
+    "token": "${BOT_INBOX_TOKEN}",
+    "publicUrl": "${BOT_INBOX_PUBLIC_URL}"
+  },
+  "bots": {
+    "assistant": {
+      "name": "Assistant",
+      "url": "${BOT_WEBHOOK_URL}",
+      "key": "${BOT_WEBHOOK_KEY}",
+      "keyHeader": "Authorization",
+      "keyPrefix": "Bearer ",
+      "replyUrl": "${BOT_REPLY_URL}"
+    }
+  }
+}

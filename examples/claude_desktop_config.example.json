@@ -1,0 +1,16 @@
+{
+  "_comment": "Merge the mcpServers entry into Claude Desktop's config. Replace the webhook URL and key. Use the node form before the package is published to npm; use the npx form afterwards or with the GitHub specifier.",
+  "mcpServers": {
+    "claude-bot-bridge": {
+      "command": "npx",
+      "args": ["-y", "github:SHAN-code5/claude-bot-bridge"],
+      "env": {
+        "BOT_WEBHOOK_URL": "https://example.com/webhook",
+        "BOT_WEBHOOK_KEY": "replace-with-a-long-random-secret",
+        "BOT_NAME": "Assistant",
+        "BOT_FROM": "Claude Desktop",
+        "BOT_REPLY_URL": "https://example.com/replies.json"
+      }
+    }
+  }
+}

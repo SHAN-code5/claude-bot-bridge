@@ -1,0 +1,11 @@
+{
+  "replies": [
+    {
+      "id": "msg_1001",
+      "threadId": "thr_demo",
+      "bot": "assistant",
+      "message": "Here is the reply the bridge should read.",
+      "at": "2026-10-24T05:00:00.000Z"
+    }
+  ]
+}
