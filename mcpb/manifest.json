@@ -1,0 +1,83 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "claude-bot-bridge",
+  "display_name": "Claude Bot Bridge",
+  "version": "0.2.0",
+  "description": "Talk to external AI bots from Claude Desktop over a webhook, and read the replies back.",
+  "long_description": "Send a message to any bot that accepts an HTTP webhook. Replies can come back in the HTTP response, from a URL Claude polls, from an SSE stream the bot hosts, or from a local inbox. No JSON editing: the install form asks for the webhook URL and secret.",
+  "author": { "name": "SHAN-code5" },
+  "license": "MIT",
+  "server": {
+    "type": "node",
+    "entry_point": "bin/claude-bot-bridge.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/bin/claude-bot-bridge.js"],
+      "env": {
+        "BOT_WEBHOOK_URL": "${user_config.webhook_url}",
+        "BOT_WEBHOOK_KEY": "${user_config.webhook_key}",
+        "BOT_NAME": "${user_config.bot_name}",
+        "BOT_FROM": "Claude Desktop",
+        "BOT_REPLY_URL": "${user_config.reply_url}",
+        "BOT_REPLY_SSE_URL": "${user_config.reply_sse_url}",
+        "BOT_SIGNING_SECRET": "${user_config.signing_secret}"
+      }
+    }
+  },
+  "user_config": {
+    "webhook_url": {
+      "type": "string",
+      "title": "Webhook URL",
+      "description": "https endpoint that receives messages from Claude.",
+      "required": true
+    },
+    "webhook_key": {
+      "type": "string",
+      "title": "Webhook secret",
+      "description": "Sent as Authorization: Bearer. Leave blank if the bot does not check a key.",
+      "sensitive": true,
+      "required": false
+    },
+    "bot_name": {
+      "type": "string",
+      "title": "Bot name",
+      "description": "Name Claude sees in list_bots.",
+      "default": "Assistant",
+      "required": false
+    },
+    "reply_url": {
+      "type": "string",
+      "title": "Reply URL",
+      "description": "Optional GET URL the bot updates with replies. Leave blank to use the webhook response or SSE.",
+      "required": false
+    },
+    "reply_sse_url": {
+      "type": "string",
+      "title": "Reply SSE URL",
+      "description": "Optional Server-Sent Events URL the bot hosts. The bridge connects out, so the bot needs no public callback.",
+      "required": false
+    },
+    "signing_secret": {
+      "type": "string",
+      "title": "HMAC signing secret",
+      "description": "Optional. Signs each webhook body as X-Bridge-Signature.",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "tools": [
+    { "name": "list_bots", "description": "List configured bots without secrets." },
+    { "name": "send_message", "description": "Send a message to one bot." },
+    { "name": "get_replies", "description": "Read replies already received." },
+    { "name": "wait_for_reply", "description": "Wait until a new reply arrives." },
+    { "name": "broadcast_message", "description": "Send one message to several bots." },
+    { "name": "relay_conversation", "description": "Run a bounded conversation between two bots." },
+    { "name": "stop_relay", "description": "Stop a running relay between turns." }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["darwin", "win32", "linux"]
+  },
+  "keywords": ["mcp", "webhook", "bot"]
+}

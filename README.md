@@ -4,7 +4,7 @@
 
 MCP server that lets Claude Desktop, Claude Code, Cursor, and any other MCP client send a message to an external AI bot over an HTTP webhook, then read the reply.
 
-The bot does not have to call Claude. It answers in the webhook response, writes a URL the bridge can poll, or POSTs to a small inbox the bridge opens on your machine.
+The bot does not have to call Claude. It answers in the webhook response, writes a URL the bridge can poll, hosts an SSE stream the bridge connects to, or POSTs to a small inbox. Version 0.2 also installs from a Desktop Extension, runs `init` and `doctor`, relays two bots, and can listen as a remote MCP server.
 
 Not affiliated with Anthropic. Claude is a trademark of its owner.
 
@@ -35,6 +35,53 @@ sequenceDiagram
   end
   Client-->>User: Answer
 ```
+
+```mermaid
+flowchart LR
+  subgraph clients [MCP clients]
+    Desktop[Claude Desktop]
+    Code[Claude Code / Cursor]
+    Remote[Remote MCP client]
+  end
+  subgraph bridge [claude-bot-bridge]
+    Tools[tools and resources]
+    Inbox[local inbox]
+    Dash[dashboard]
+  end
+  Desktop -->|stdio or .mcpb| Tools
+  Code -->|stdio| Tools
+  Remote -->|Streamable HTTP| Tools
+  Tools -->|POST webhook| Bot[External bots]
+  Bot -->|SSE or reply URL| Tools
+  Bot -->|POST reply| Inbox
+  Tools --> Dash
+```
+
+## Install without editing JSON
+
+**Desktop Extension.** Build a one-click bundle and open it in Claude Desktop (double-click, or Settings → Extensions → Advanced → Install Extension):
+
+```bash
+node bin/claude-bot-bridge.js pack
+```
+
+That writes `claude-bot-bridge.mcpb`. The install form asks for the webhook URL and secret. The manifest is [`mcpb/manifest.json`](mcpb/manifest.json).
+
+**Init.** This merges the server into the Claude Desktop config for macOS, Windows, or Linux:
+
+```bash
+npx claude-bot-bridge init --url https://example.com/webhook --key "$BOT_WEBHOOK_KEY" --name Assistant
+```
+
+Quit Claude Desktop fully, then open it again. `npx claude-bot-bridge` works after the package is published; until then use `node bin/claude-bot-bridge.js` or `npx github:SHAN-code5/claude-bot-bridge`.
+
+**Doctor.**
+
+```bash
+BOT_WEBHOOK_URL=https://example.com/webhook BOT_WEBHOOK_KEY=secret node bin/claude-bot-bridge.js doctor
+```
+
+It sends one `doctor: true` ping. Exit code 0 means every check passed.
 
 ## Quick start
 
@@ -150,7 +197,9 @@ Reply teen tarah se aa sakti hai:
 - Bot kisi URL pe reply likhe, aur bridge us URL ko poll kare (`BOT_REPLY_URL`).
 - Bot local inbox pe POST kare. Remote bot ke liye tunnel chahiye, aur token set karo.
 
-Yaad rakho: Claude tabhi bot se baat karta hai jab aap prompt karte ho. Yeh live chat nahi hai. Bot ko jo message milta hai use untrusted samjho — bot apne system prompt se upar us message ko instructions mat maane.
+JSON khud edit nahi karna ho to `node bin/claude-bot-bridge.js pack` se `.mcpb` banao aur Claude Desktop mein install karo. Form mein URL aur key daalni hai. Ya `node bin/claude-bot-bridge.js init --url ... --key ...` config khud likh dega.
+
+Yaad rakho: Claude tabhi bot se baat karta hai jab aap prompt karte ho. SSE aur inbox reply ko logging notification se dikhate hain, lekin chat mein tabhi aate hain jab koi tool chal raha ho. Bot ko jo message milta hai use untrusted samjho.
 
 ## Tools
 
@@ -379,6 +428,34 @@ The bridge forwards text. It does not give the bot a way to call tools inside Cl
 - The MCP client can cancel `wait_for_reply`. The bridge stops that call instead of blocking later tools until the timeout.
 - One inbox serves every bot. Send the bot id in the POST if more than one bot replies there.
 - Timestamps in tool results are ISO-8601 UTC.
+
+## More commands
+
+| Command | What it does |
+| --- | --- |
+| `init --url <url> [--key <secret>]` | Merge this server into the Claude Desktop config. |
+| `doctor` | Ping each webhook and GET each reply URL. |
+| `http --port 8080` | Streamable HTTP MCP on localhost. Set `MCP_HTTP_TOKEN` before binding anything else. |
+| `dashboard` | Local page of threads and messages. `DASHBOARD_PORT` also turns it on next to stdio. |
+| `tunnel` | Run `cloudflared` against the inbox and print the public URL. |
+| `pack` | Write `claude-bot-bridge.mcpb`. |
+
+`broadcast_message` sends one text to many bots. `relay_conversation` lets two configured bots answer each other for up to 20 turns. `stop_relay` asks that loop to stop after the current turn. Thread history is an MCP resource: `bridge://threads` and `bridge://thread/{threadId}`.
+
+A reply SSE URL (`BOT_REPLY_SSE_URL`) is a stream the bot hosts. The bridge connects out, so the bot does not need a public callback. Events look like `data: {"message":"...","threadId":"..."}`.
+
+Optional HMAC: set `BOT_SIGNING_SECRET`. Each POST gets `X-Bridge-Timestamp` and `X-Bridge-Signature: sha256=<hmac of timestamp.body>`. The inbox checks `BOT_INBOX_SIGNING_SECRET` the same way. `BOT_ALLOWED_HOSTS` is a comma-separated host allowlist. Each bot defaults to 30 requests a minute, with two retries on 429 and 5xx.
+
+Recipes for n8n, Zapier, Discord-style bots, and a Grok-style webhook are in [docs/recipes.md](docs/recipes.md). The threat model is in [SECURITY.md](SECURITY.md). Releases follow [semver](https://semver.org); see [CHANGELOG.md](CHANGELOG.md).
+
+Docker:
+
+```bash
+docker build -t claude-bot-bridge .
+docker run --rm -p 8080:8080 -e BOT_WEBHOOK_URL=https://example.com/webhook -e BOT_WEBHOOK_KEY=secret -e MCP_HTTP_TOKEN=another-secret claude-bot-bridge
+```
+
+The image listens on `0.0.0.0:8080` and refuses to start until `MCP_HTTP_TOKEN` is set.
 
 ## Development
 

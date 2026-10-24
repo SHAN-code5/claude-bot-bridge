@@ -1,0 +1,5 @@
+node_modules
+test
+.git
+*.mcpb
+claude-bot-bridge.config.json
