@@ -25,6 +25,11 @@ test('the process speaks initialize, tools/list, and tools/call over stdio', asy
   const seen = [];
   const secret = 'super-secret-value';
   const webhook = await listen(async (req, res) => {
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('standing reply');
+      return;
+    }
     const body = JSON.parse(await readBody(req));
     seen.push({ authorization: req.headers.authorization, body });
     json(res, 200, { reply: `pong:${body.message}`, threadId: body.threadId });
@@ -34,6 +39,7 @@ test('the process speaks initialize, tools/list, and tools/call over stdio', asy
     BOT_WEBHOOK_KEY: secret,
     BOT_NAME: 'Helper',
     BOT_FROM: 'Claude Desktop',
+    BOT_REPLY_URL: `${webhook.url}/file.txt`,
   });
 
   try {
@@ -90,6 +96,20 @@ test('the process speaks initialize, tools/list, and tools/call over stdio', asy
 
     const unknownTool = await child.request('tools/call', { name: 'nope', arguments: {} }, 6);
     assert.equal(unknownTool.result.isError, true);
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+        params: { name: 'wait_for_reply', arguments: { timeoutMs: 20000, pollIntervalMs: 1000 } },
+      })}\n`
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    child.notify('notifications/cancelled', { requestId: 7 });
+    const ping = await child.request('ping', {}, 8);
+    assert.deepEqual(ping.result, {});
+    assert.equal(child.unexpected.some((msg) => msg.id === 7), false);
 
     assert.equal(child.stderrText().includes(secret), false);
     assert.match(child.stderrText(), /stdio ready/);

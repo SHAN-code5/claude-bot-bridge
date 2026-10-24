@@ -150,7 +150,66 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     }
   }
 
-  async function onLine(line) {
+  const queue = [];
+  const cancelled = new Set();
+  let inflight = null;
+  let draining = false;
+  let drainPromise = Promise.resolve();
+
+  function sameId(left, right) {
+    return left != null && right != null && String(left) === String(right);
+  }
+
+  function noteCancel(message) {
+    const requestId = message && message.params ? message.params.requestId : undefined;
+    if (requestId == null) return;
+    cancelled.add(String(requestId));
+    if (inflight && sameId(inflight.id, requestId)) inflight.controller.abort();
+  }
+
+  function drain() {
+    if (draining) return drainPromise;
+    draining = true;
+    drainPromise = (async () => {
+      while (queue.length) {
+        const message = queue.shift();
+        if (!message || typeof message !== 'object' || Array.isArray(message)) {
+          write({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request' } });
+          continue;
+        }
+        if (message.id != null && cancelled.has(String(message.id))) {
+          cancelled.delete(String(message.id));
+          continue;
+        }
+        const controller = new AbortController();
+        if (message.id != null) inflight = { id: message.id, controller };
+        try {
+          const response = await handler(message, controller.signal);
+          if (controller.signal.aborted) continue;
+          if (response) write(response);
+        } catch (err) {
+          if (err && err.name === 'Cancelled') continue;
+          if (message.id != null && !controller.signal.aborted) {
+            write({
+              jsonrpc: '2.0',
+              id: message.id,
+              error: { code: -32603, message: redact(err && err.message ? err.message : 'Internal error', config.secrets) },
+            });
+          } else {
+            log.error(err && err.message ? err.message : 'failed to handle message');
+          }
+        } finally {
+          inflight = null;
+        }
+      }
+    })().finally(() => {
+      draining = false;
+      if (queue.length) drain();
+    });
+    return drainPromise;
+  }
+
+  function onLine(line) {
     let message;
     try {
       message = JSON.parse(line);
@@ -162,8 +221,12 @@ async function main(argv = process.argv.slice(2), env = process.env) {
       write({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Batch requests are not supported' } });
       return;
     }
-    const response = await handler(message);
-    if (response) write(response);
+    if (message && message.method === 'notifications/cancelled') {
+      noteCancel(message);
+      return;
+    }
+    queue.push(message);
+    drain();
   }
 
   const reader = createLineReader(onLine, () => {
@@ -176,7 +239,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     });
   });
   process.stdin.on('end', () => {
-    reader.idle.then(() => shutdown(0), () => shutdown(0));
+    reader.idle.then(() => drainPromise, () => drainPromise).then(() => shutdown(0), () => shutdown(0));
   });
   process.stdin.on('error', () => shutdown(0));
   process.stdout.on('error', () => shutdown(0));

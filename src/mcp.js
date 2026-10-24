@@ -8,7 +8,7 @@ const SUPPORTED_VERSIONS = new Set(['2024-10-07', '2024-11-05', '2025-03-26', '2
 const DEFAULT_VERSION = '2025-03-26';
 
 function createHandler({ service, serverInfo, instructions, secrets }) {
-  return async function handle(message) {
+  return async function handle(message, signal) {
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
       return rpcError(null, -32600, 'Invalid Request');
     }
@@ -50,12 +50,13 @@ function createHandler({ service, serverInfo, instructions, secrets }) {
         ) {
           return rpcError(message.id, -32602, 'Invalid params: arguments must be an object');
         }
-        const toolResult = await service.call(params.name, params.arguments || {});
+        const toolResult = await service.call(params.name, params.arguments || {}, { signal });
         return rpcResult(message.id, toolResult);
       }
       if (!hasId) return null;
       return rpcError(message.id, -32601, `Method not found: ${method}`);
     } catch (err) {
+      if (err && err.name === 'Cancelled') throw err;
       if (!hasId) return null;
       const messageText = redact(err && err.message ? err.message : 'Internal error', secrets || []);
       return rpcError(message.id, -32603, messageText);

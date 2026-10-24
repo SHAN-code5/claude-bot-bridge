@@ -271,6 +271,44 @@ test('wait_for_reply returns an inbox post and ignores it when asked', async () 
   }
 });
 
+test('a repeated sync reply id is kept, huge bodies are rejected, and string numbers are accepted', async () => {
+  let hits = 0;
+  const webhook = await listen(async (req, res) => {
+    hits += 1;
+    await readBody(req);
+    if (hits === 1) {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('x'.repeat(1024 * 1024 + 50));
+      return;
+    }
+    json(res, 200, { reply: 'same words', id: 'fixed' });
+  });
+  try {
+    const config = load({ BOT_WEBHOOK_URL: webhook.url, BOT_WEBHOOK_KEY: 'super-secret-value' });
+    const { service, store } = use(config);
+    const huge = await service.call('send_message', { message: 'big' });
+    assert.equal(huge.isError, true);
+    assert.match(huge.content[0].text, /1 MiB/);
+
+    const first = await service.call('send_message', { message: 'one', threadId: 'thr_same' });
+    const second = await service.call('send_message', { message: 'two', threadId: 'thr_same' });
+    assert.match(first.content[0].text, /same words/);
+    assert.match(second.content[0].text, /same words/);
+    const replies = await service.call('get_replies', { threadId: 'thr_same', limit: '10' });
+    assert.match(replies.content[0].text, /2 replies/);
+    assert.equal(store.list({ threadId: 'thr_same' }).length, 2);
+
+    const waited = await service.call('wait_for_reply', {
+      threadId: 'thr_same',
+      timeoutMs: '0',
+      includeExisting: 'false',
+    });
+    assert.equal(waited.isError, false);
+  } finally {
+    await webhook.close();
+  }
+});
+
 test('rejects bad tool arguments and unknown bots', async () => {
   const config = load({
     CLAUDE_BOT_BRIDGE_BOTS: JSON.stringify({

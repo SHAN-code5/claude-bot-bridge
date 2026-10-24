@@ -102,8 +102,13 @@ class ReplyStore {
     const dir = path.dirname(this.file);
     fs.mkdirSync(dir, { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ replies: this.items }, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify({ replies: this.items }, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, this.file);
+    try {
+      fs.chmodSync(this.file, 0o600);
+    } catch {
+      // Some platforms cannot chmod. The file still holds the replies.
+    }
   }
 }
 

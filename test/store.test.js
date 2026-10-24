@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const { ReplyStore } = require('../src/store');
 const { tempDir } = require('./helpers');
@@ -50,6 +51,10 @@ test('dedupes, filters, marks delivered, and redacts secrets in the state file',
   assert.equal(store.nextUndelivered({ threadId: 'thr_a' }).id, 'r3');
 
   const restored = new ReplyStore({ file, secrets });
+  if (process.platform !== 'win32') {
+    const mode = fs.statSync(file).mode & 0o777;
+    assert.equal(mode, 0o600);
+  }
   assert.equal(restored.list().length, 3);
   assert.equal(restored.list()[0].text.includes('super-secret-value'), false);
   assert.equal(restored.list()[0].delivered, true);
@@ -67,6 +72,6 @@ test('drops the oldest reply past the cap so memory stays bounded', () => {
 test('a corrupt state file fails with a clear message', () => {
   const dir = tempDir();
   const file = path.join(dir, 'state.json');
-  require('node:fs').writeFileSync(file, '{');
+  fs.writeFileSync(file, '{');
   assert.throws(() => new ReplyStore({ file }), /not valid JSON/);
 });

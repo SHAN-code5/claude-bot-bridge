@@ -29,6 +29,10 @@ function startInbox({ config, store, log }) {
     server.once('error', onError);
     server.listen(inbox.port, inbox.host, () => {
       server.removeListener('error', onError);
+      server.on('error', (err) => {
+        const reason = err && (err.code || err.message) ? err.code || err.message : 'socket error';
+        if (log) log.error(`inbox error: ${reason}`);
+      });
       const address = server.address();
       const boundPort = address && typeof address === 'object' ? address.port : inbox.port;
       const localHost = inbox.host === '0.0.0.0' || inbox.host === '::' ? '127.0.0.1' : inbox.host;
@@ -110,19 +114,24 @@ async function handle(req, res, ctx) {
     return;
   }
   ctx.log.info(
-    `inbox accepted id=${stored[0].id} thread=${stored[0].threadId || '-'} bot=${stored[0].bot || '-'}`
+    `inbox accepted id=${oneLine(stored[0].id)} thread=${oneLine(stored[0].threadId)} bot=${oneLine(stored[0].bot)}`
   );
   sendJson(res, 202, { ok: true, id: stored[0].id, count: stored.length });
 }
 
 function tokenOk(req, token) {
+  const candidates = [];
   const authorization = req.headers.authorization || '';
-  let presented = '';
-  if (/^bearer\s+/i.test(authorization)) presented = authorization.replace(/^bearer\s+/i, '').trim();
-  else if (authorization.trim()) presented = authorization.trim();
+  if (/^bearer\s+/i.test(authorization)) candidates.push(authorization.replace(/^bearer\s+/i, '').trim());
+  else if (authorization.trim()) candidates.push(authorization.trim());
   const header = req.headers['x-bridge-token'];
-  if (!presented && typeof header === 'string') presented = header.trim();
-  return safeEqual(presented, token);
+  if (typeof header === 'string' && header.trim()) candidates.push(header.trim());
+  return candidates.some((value) => safeEqual(value, token));
+}
+
+function oneLine(value) {
+  const text = value == null || value === '' ? '-' : String(value);
+  return text.replace(/[\r\n]/g, ' ').slice(0, 120);
 }
 
 function safeEqual(leftValue, rightValue) {
@@ -139,25 +148,30 @@ function readBody(req, res) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
-    let failed = false;
+    let settled = false;
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
     req.on('data', (chunk) => {
-      if (failed) return;
+      if (settled) return;
       size += chunk.length;
       if (size > MAX_BODY) {
-        failed = true;
         sendJson(res, 413, { ok: false, error: 'Body is too large' });
         const error = new Error('payload too large');
         error.status = 413;
-        reject(error);
-      } else {
-        chunks.push(chunk);
+        finish(() => reject(error));
+        res.on('finish', () => req.destroy());
+        return;
       }
+      chunks.push(chunk);
     });
     req.on('end', () => {
-      if (!failed) resolve(Buffer.concat(chunks).toString('utf8'));
+      finish(() => resolve(Buffer.concat(chunks).toString('utf8')));
     });
     req.on('error', (err) => {
-      if (!failed) reject(err);
+      finish(() => reject(err));
     });
   });
 }

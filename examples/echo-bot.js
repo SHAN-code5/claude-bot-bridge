@@ -40,8 +40,9 @@ function startEchoBot(options = {}) {
     let payload = {};
     try {
       payload = JSON.parse((await readBody(req)) || '{}');
-    } catch {
-      sendJson(res, 400, { ok: false, error: 'Body must be JSON' });
+    } catch (err) {
+      const tooLarge = err && err.message === 'Body is too large';
+      sendJson(res, tooLarge ? 413 : 400, { ok: false, error: tooLarge ? err.message : 'Body must be JSON' });
       return;
     }
 
@@ -119,7 +120,16 @@ function sendJson(res, status, body) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > 1024 * 1024) {
+        reject(new Error('Body is too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
