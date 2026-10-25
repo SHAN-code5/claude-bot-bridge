@@ -13,12 +13,13 @@
  * Based on the Python implementation from browser_session.py
  */
 
+import path from "path";
 import type { BrowserContext, Page } from "patchright";
 import type { SharedContextManager } from "./shared-context-manager.js";
 import type { AuthManager } from "../auth/auth-manager.js";
 import { humanType, randomDelay } from "../utils/stealth-utils.js";
 import { snapshotAllResponses } from "../utils/page-utils.js";
-import { waitForStableAnswer, snapshotPriorAnswers } from "../notebooklm/chat.js";
+import { waitForStableAnswer, snapshotPriorAnswers, dismissOverlays } from "../notebooklm/chat.js";
 import {
   extractCitations as extractCitationsFromPage,
   type SourceFormat,
@@ -177,8 +178,9 @@ export class BrowserSession {
     try {
       // PRIMARY: Exact Python selector - textarea.query-box-input
       log.info("  ⏳ Waiting for chat input (textarea.query-box-input)...");
+      await dismissOverlays(this.page).catch(() => undefined);
       await this.page.waitForSelector("textarea.query-box-input", {
-        timeout: 10000, // Python uses 10s timeout
+        timeout: 25000, // 2026 Gemini Notebook layout loads slower
         state: "visible", // ONLY check visibility (NO disabled check!)
       });
       log.success("  ✅ Chat input ready!");
@@ -193,6 +195,13 @@ export class BrowserSession {
         log.success("  ✅ Chat input ready (fallback)!");
       } catch (error) {
         log.error(`  ❌ NotebookLM interface not ready: ${error}`);
+        try {
+          const shot = path.join(CONFIG.dataDir, "last_ready_failure.png");
+          await this.page.screenshot({ path: shot });
+          log.error(`  📸 Screenshot: ${shot} (url ${this.page.url()})`);
+        } catch {
+          // ignore
+        }
         throw new Error(
           "Could not find NotebookLM chat input. " +
             "Please ensure the notebook page has loaded correctly.",
@@ -390,6 +399,9 @@ export class BrowserSession {
         existingResponses = await snapshotAllResponses(page);
       }
       log.success(`  ✅ Captured ${existingResponses.length} existing responses`);
+
+      // Close announcement popups that block the chat box (2026 layout)
+      await dismissOverlays(page);
 
       // Find the chat input
       const inputSelector = await this.findChatInput();

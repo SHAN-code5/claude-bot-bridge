@@ -177,7 +177,10 @@ function isPlaceholder(text: string): boolean {
   if (PLACEHOLDER_SNIPPETS.some((s) => lower.includes(s))) return true;
   // Short text ending with "..." is almost certainly a loading indicator;
   // real responses run well past 50 chars.
-  if (text.length < 50 && text.trim().endsWith("...")) return true;
+  // NotebookLM 2026 streams status lines ending in a Unicode ellipsis
+  // ("Scanning the text…") before the answer.
+  const t = text.trim();
+  if (text.length < 80 && (t.endsWith("...") || t.endsWith("\u2026"))) return true;
   return false;
 }
 
@@ -210,11 +213,78 @@ export interface AskOptions {
  * the new turn isn't confused with prior turns in the same session.
  */
 export async function snapshotPriorAnswers(page: Page): Promise<string[]> {
-  return page
-    .locator(Selectors.chat.answerText)
-    .allInnerTexts()
-    .then((texts) => texts.map((t) => t.trim()).filter(Boolean))
+  return extractAnswers(page)
+    .then((items) => items.map((it) => sanitizeAnswer(it.text)).filter(Boolean))
     .catch(() => []);
+}
+
+interface ExtractedAnswer {
+  text: string;
+  /** The turn's action row (copy, save to note) is mounted: streaming is over. */
+  done: boolean;
+}
+
+/**
+ * 2026 "Gemini Notebook" layout: each answer starts with a collapsible
+ * `.thinking-chain` ("Thoughts", live status lines). Drop it, plus citation
+ * buttons and icon ligatures, and measure the clone off-screen so `innerText`
+ * keeps paragraph breaks.
+ */
+async function extractAnswers(page: Page): Promise<ExtractedAnswer[]> {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll(".to-user-container")).map((c) => {
+      const m = c.querySelector(".message-text-content");
+      if (!m) return { text: "", done: false };
+      const k = m.cloneNode(true) as HTMLElement;
+      k.querySelectorAll(
+        '[class*="thinking-chain"], .thinking-message, .citation-marker, button, mat-icon'
+      ).forEach((e) => e.remove());
+      const host = document.createElement("div");
+      host.style.cssText = "position:fixed;left:-99999px;top:0;width:900px;";
+      host.appendChild(k);
+      document.body.appendChild(host);
+      const text = (k.innerText || "").trim();
+      host.remove();
+      return { text, done: !!c.querySelector(".action") };
+    })
+  );
+}
+
+/**
+ * Close announcement dialogs (e.g. the 2026 "limits refresh every 5 hours"
+ * notice) whose dark backdrop blocks clicks on the chat box.
+ */
+export async function dismissOverlays(page: Page): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    const open = await page
+      .locator(".cdk-overlay-backdrop-showing")
+      .count()
+      .catch(() => 0);
+    if (!open) return;
+    const closed = await page
+      .evaluate(() => {
+        for (const pane of Array.from(document.querySelectorAll(".cdk-overlay-pane"))) {
+          const btn = Array.from(pane.querySelectorAll("button")).find((b) =>
+            /close|dismiss|got it|ok/i.test(
+              (b.getAttribute("aria-label") || "") + " " + (b.innerText || "")
+            )
+          );
+          if (btn) {
+            btn.click();
+            return true;
+          }
+        }
+        return false;
+      })
+      .catch(() => false);
+    if (!closed) await page.keyboard.press("Escape").catch(() => undefined);
+    await page.waitForTimeout(600).catch(() => undefined);
+  }
+  await page
+    .locator(".cdk-overlay-backdrop-showing")
+    .first()
+    .click({ timeout: 2000, force: true })
+    .catch(() => undefined);
 }
 
 /**
@@ -309,11 +379,10 @@ export async function waitForStableAnswer(
  */
 async function readLatestAnswer(page: Page): Promise<string | null> {
   try {
-    const raw = await page
-      .locator(Selectors.chat.latestAnswerText)
-      .last()
-      .innerText({ timeout: 2_000 });
-    const cleaned = sanitizeAnswer(raw);
+    const items = await extractAnswers(page);
+    const last = items[items.length - 1];
+    if (!last || !last.done) return null;
+    const cleaned = sanitizeAnswer(last.text);
     return cleaned.length > 0 ? cleaned : null;
   } catch {
     return null;
