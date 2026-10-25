@@ -1,46 +1,65 @@
 {
-  "name": "claude-bot-bridge",
-  "version": "0.2.0",
-  "description": "MCP server that lets Claude Desktop and other clients talk to external AI bots over HTTP webhooks, and read the replies back.",
-  "license": "MIT",
-  "author": "SHAN-code5",
-  "type": "commonjs",
+  "name": "notebooklm-mcp",
+  "version": "2.1.0",
+  "description": "MCP server for Google NotebookLM (maintained fork) — chat, source ingestion, audio overviews, citations, stdio + Streamable-HTTP transports.",
+  "type": "module",
   "bin": {
-    "claude-bot-bridge": "./bin/claude-bot-bridge.js"
-  },
-  "main": "./src/index.js",
-  "files": [
-    "bin/",
-    "src/",
-    "examples/",
-    "mcpb/",
-    "docs/",
-    "README.md",
-    "SECURITY.md",
-    "CHANGELOG.md",
-    "LICENSE"
-  ],
-  "engines": {
-    "node": ">=18"
+    "notebooklm-mcp": "dist/index.js"
   },
   "scripts": {
-    "start": "node ./bin/claude-bot-bridge.js",
-    "test": "node --test --test-reporter=spec test/*.test.js"
+    "build": "tsc",
+    "postbuild": "chmod +x dist/index.js",
+    "watch": "tsc --watch",
+    "dev": "tsx watch src/index.ts",
+    "prepare": "npm run build",
+    "test": "tsx src/index.ts",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "check": "npm run format:check && npm run lint && npm run build"
   },
+  "keywords": [
+    "mcp",
+    "notebooklm",
+    "gemini",
+    "ai",
+    "claude"
+  ],
+  "author": "Gérôme Dexheimer <hello@geromedexheimer.de> (https://github.com/PleasePrompto)",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SHAN-code5/claude-bot-bridge.git"
   },
+  "homepage": "https://github.com/SHAN-code5/claude-bot-bridge#readme",
   "bugs": {
     "url": "https://github.com/SHAN-code5/claude-bot-bridge/issues"
   },
-  "homepage": "https://github.com/SHAN-code5/claude-bot-bridge#readme",
-  "keywords": [
-    "mcp",
-    "model-context-protocol",
-    "claude",
-    "webhook",
-    "bot",
-    "stdio"
-  ]
+  "files": [
+    "dist",
+    "README.md",
+    "NOTEBOOKLM_USAGE.md",
+    "LICENSE",
+    "docs"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "dotenv": "^16.4.0",
+    "env-paths": "^3.0.0",
+    "globby": "^14.1.0",
+    "patchright": "^1.64.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^20.11.0",
+    "eslint": "^10.2.1",
+    "prettier": "^3.8.3",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.59.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
 }
